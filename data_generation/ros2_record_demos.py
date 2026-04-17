@@ -2,7 +2,7 @@
 """
 ROS2 node for recording real robot arm demonstrations.
 
-Outputs the exact directory structure expected by real_arm_to_zarr.py:
+Outputs the exact directory structure expected by XArmDataset:
 
     <output_dir>/<task_name>/
         episode_N/

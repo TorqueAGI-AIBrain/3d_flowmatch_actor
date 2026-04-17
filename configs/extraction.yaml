@@ -1,0 +1,36 @@
+# extraction.yaml: ROS2 bag to episode directory extraction config.
+
+# Input/output paths
+bag_dir: /data/robot_bags
+output_dir: /data/robot_demos
+tasks:
+  - place_object_in_toolbox
+  - pull_open_toolbox
+  - drop_object_in_bag
+  - insert_into_cable
+  - press_buttons
+
+# Robot
+robot:
+  eef_topic: /xarm/end_effector_pose
+  gripper_topic: /xarm/gripper/state
+  world_frame: base_link
+
+# Camera configuration
+cameras:
+  front:
+    rgb_topic: /rgb/image_raw
+    depth_topic: /depth_to_rgb/image_raw
+    camera_info_topic: /rgb/camera_info
+    tf_frame: rgb_camera_link
+  wrist:
+    rgb_topic: /camera_wrist/color/image_raw
+    depth_topic: /camera_wrist/aligned_depth_to_color/image_raw
+    camera_info_topic: /camera_wrist/color/camera_info
+    tf_frame: camera_wrist_color_optical_frame
+
+# Processing
+image_size: 256
+target_hz: 10.0
+depth_scale: 1000.0  # divisor to convert raw depth to meters
+sync_slop: 0.05  # max time difference (s) for message synchronization

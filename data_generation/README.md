@@ -1,42 +1,41 @@
 # Data Generation
 
-Tools for collecting and converting real robot arm demonstrations into training data for 3D FlowMatch Actor.
+Tools for collecting real robot demonstrations and converting them into training data for 3D FlowMatch Actor.
 
-## Pipeline Overview
+## Pipeline
 
 ```
-ROS2 topics ──► ros2_record_demos.py ──► episode directories ──► real_arm_to_zarr.py ──► zarr stores ──► training
+                  Option A: Live recording
+ROS2 topics ──────► ros2_record_demos.py ──► episode dirs ─┐
+                                                            ├──► real_arm_to_zarr.py ──► zarr stores
+ROS2 bags (.mcap) ► bag_to_episodes.py ────► episode dirs ─┘
+                  Option B: Offline extraction
 ```
 
-## 1. Record Demonstrations
+Both paths produce the same episode directory format, which `real_arm_to_zarr.py` converts to zarr for training.
 
-`ros2_record_demos.py` is a ROS2 node that captures synchronized RGB, depth, EEF pose, and gripper state from a real robot arm.
+## Step 1: Collect Demonstrations
 
-### Prerequisites
+### Option A: Live Recording
 
-- ROS2 Humble
-- Cameras publishing RGB + depth (e.g. RealSense D435i, Azure Kinect)
-- Robot arm publishing EEF pose as `geometry_msgs/PoseStamped`
-- TF tree with camera frames for extrinsic calibration
-
-### Usage
+`ros2_record_demos.py` — a ROS2 node that captures synchronized RGB, depth, EEF pose, and gripper state in real time.
 
 ```bash
-ros2 run data_processing ros2_record_demos \
+# Configure topics and cameras in the YAML
+ros2 run data_generation ros2_record_demos \
     --ros-args \
-    -p task_name:=pick_cup \
-    -p output_dir:=/path/to/demos \
+    -p task_name:=place_wrench \
+    -p output_dir:=/data/robot_demos \
     -p cameras:="['front', 'wrist']" \
     -p hz:=10.0 \
-    -p instruction:="pick up the red cup"
+    -p instruction:="place the wrench in the toolbox"
 ```
 
-### Controls
+See `configs/recording.yaml` for the full parameter reference.
 
-| Input | Action |
-|-------|--------|
-| ENTER | Start/stop episode recording |
-| q | Quit and save |
+**Controls:**
+- `ENTER` — start/stop episode recording
+- `q` — quit and save
 
 Episodes can also be triggered via ROS2 services:
 ```bash
@@ -44,55 +43,85 @@ ros2 service call /recorder/start_episode std_srvs/srv/Trigger
 ros2 service call /recorder/stop_episode  std_srvs/srv/Trigger
 ```
 
-### Parameters
+### Option B: Offline Bag Extraction
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `task_name` | `default_task` | Task label for output directory |
-| `output_dir` | `/tmp/robot_demos` | Root output path |
-| `cameras` | `['front', 'wrist']` | Camera names |
-| `hz` | `10.0` | Recording frequency |
-| `instruction` | `"do the task"` | Language instruction for the task |
-| `eef_topic` | `/end_effector_pose` | EEF pose topic |
-| `gripper_topic` | `/gripper/state` | Gripper state topic |
-| `world_frame` | `base_link` | TF world frame |
+`bag_to_episodes.py` — converts pre-recorded ROS2 bag files (`.mcap` or `.db3`) into episode directories. Handles mixed camera setups (e.g. Azure Kinect front + RealSense D435i wrist).
 
-Per-camera topics default to `/camera_<cam>/color/image_raw`, etc. Override with `<cam>_rgb_topic`, `<cam>_depth_topic`, `<cam>_info_topic` parameters.
+```bash
+python -m data_generation.bag_to_episodes --config configs/extraction.yaml
+```
 
-### Output Structure
+Override any config value via CLI:
+```bash
+python -m data_generation.bag_to_episodes --config configs/extraction.yaml \
+    --bag_dir /other/path --target_hz 5.0
+```
+
+Expected bag layout:
+```
+<bag_dir>/
+    <task_name>/
+        episode_0.mcap
+        episode_1.mcap
+        ...
+        instructions.json  (optional)
+```
+
+See `configs/extraction.yaml` for camera topics, sync tolerance, and task list.
+
+## Episode Directory Format
+
+Both collection methods produce this structure:
 
 ```
 <output_dir>/<task_name>/
     episode_0/
-        rgb/<cam>_0000.png          # 256x256 RGB
-        depth/<cam>_0000.png        # 16-bit PNG depth (millimeters)
-        eef_states.npy              # (T, 8) [x,y,z, qx,qy,qz,qw, gripper_open]
+        rgb/front_0000.png          # 256x256 RGB
+        rgb/wrist_0000.png
+        depth/front_0000.png        # 16-bit PNG, millimeters
+        depth/wrist_0000.png
+        eef_states.npy              # (T, 8) float32 [x,y,z, qx,qy,qz,qw, gripper]
         camera_extrinsics.npy       # (ncam, 4, 4) cam-to-world
         camera_intrinsics.npy       # (ncam, 3, 3)
     episode_1/
         ...
-    instructions.json               # {"0": ["pick up the red cup"]}
+    instructions.json               # {"0": ["place the wrench in the toolbox"]}
 ```
 
-## 2. Convert to Zarr
+## Step 2: Convert to Zarr
 
-Use `data_processing/real_arm_to_zarr.py` to convert episode directories into zarr stores for training:
+Convert episode directories to zarr stores for training:
 
 ```bash
 python -m data_processing.real_arm_to_zarr \
-    --root /path/to/demos \
-    --tgt /path/to/zarr_output \
+    --root /data/robot_demos \
+    --tgt /data/zarr_output \
     --cameras front wrist \
-    --tasks pick_cup \
+    --tasks place_wrench \
     --val_ratio 0.1
 ```
 
-This produces `train.zarr/` and `val.zarr/` compatible with `RealArmDataset`.
+Produces `train.zarr/` and `val.zarr/` compatible with `RealArmDataset`.
 
-## 3. Train
+## Step 3: Train
 
 ```bash
 bash scripts/real_arm/train_real_arm.sh
 ```
 
-Update the `DATA_PATH` in the script to point to your zarr output directory.
+Update `DATA_PATH` in the script to point to your zarr output.
+
+## Configuration Files
+
+| File | Purpose |
+|------|---------|
+| `configs/recording.yaml` | Camera topics, robot topics, recording Hz for live demos |
+| `configs/extraction.yaml` | Bag dir, camera topics, sync tolerance, task list for offline extraction |
+
+## Dependencies
+
+Core: `numpy`, `opencv-python`, `scipy`, `pyyaml`
+
+For live recording: `rclpy`, `cv_bridge`, `tf2_ros`, `sensor_msgs`, `geometry_msgs`
+
+For bag extraction: `rosbags==0.9.23`
