@@ -1,0 +1,30 @@
+# recording.yaml: ROS2 demo recording configuration for xArm + cameras.
+
+task_name: default_task
+output_dir: /data/robot_demos
+instruction: "do the task"
+variation: 0
+hz: 10.0
+nhand: 1
+
+# Robot
+robot:
+  world_frame: base_link
+  eef_frame: link_eef
+  eef_topic: /xarm/end_effector_pose
+  gripper_topic: /xarm/gripper/state
+
+# Camera configuration (order matters — matches zarr camera axis)
+cameras:
+  front:
+    rgb_topic: /rgb/image_raw
+    depth_topic: /depth_to_rgb/image_raw
+    camera_info_topic: /rgb/camera_info
+    tf_frame: rgb_camera_link
+  wrist:
+    rgb_topic: /camera_wrist/color/image_raw
+    depth_topic: /camera_wrist/aligned_depth_to_color/image_raw
+    camera_info_topic: /camera_wrist/color/camera_info
+    tf_frame: camera_wrist_color_optical_frame
+
+image_size: 256

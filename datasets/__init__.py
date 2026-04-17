@@ -5,6 +5,7 @@ from .rlbench import (
     PeractTwoCamDataset,
     HiveformerDataset
 )
+from .real_arm import RealArmDataset
 
 
 def fetch_dataset_class(dataset_name):
@@ -14,10 +15,11 @@ def fetch_dataset_class(dataset_name):
         "Peract2_3dfront": Peract2SingleCamDataset,
         "Peract": PeractDataset,
         "PeractTwoCam": PeractTwoCamDataset,
-        "HiveformerRLBench": HiveformerDataset
+        "HiveformerRLBench": HiveformerDataset,
+        "RealArm": RealArmDataset,
     }
-    
+
     if dataset_name not in dataset_classes:
         raise ValueError(f"Unknown dataset: {dataset_name}")
-    
+
     return dataset_classes[dataset_name]
