@@ -11,4 +11,6 @@ def fetch_train_tester(dataset_name):
         return PeractTrainTester
     if 'rlbench' in dataset_name:
         return RLBenchTrainTester
+    if 'xarm' in dataset_name:
+        return RLBenchTrainTester
     return None

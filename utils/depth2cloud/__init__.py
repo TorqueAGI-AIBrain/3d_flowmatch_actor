@@ -7,4 +7,6 @@ def fetch_depth2cloud(dataset_name):
         return RLBenchDepth2Cloud((256, 256))
     if 'rlbench' in dataset_name:
         return RLBenchDepth2Cloud((256, 256))
+    if 'xarm' in dataset_name:
+        return RLBenchDepth2Cloud((256, 256))
     return None

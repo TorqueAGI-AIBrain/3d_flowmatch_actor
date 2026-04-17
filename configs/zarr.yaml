@@ -1,0 +1,30 @@
+# zarr.yaml: Episode directory to zarr conversion config.
+
+# Input/output paths
+root: data
+tgt: data/zarr
+
+# Tasks to include
+tasks:
+  - default_task
+
+# Camera names (must match filenames in episode rgb/depth folders)
+cameras:
+  - front
+  - wrist
+
+# Robot
+nhand: 1
+
+# Processing
+val_ratio: 0.1
+trajectory_length: 1  # 1 = keypose only
+num_history: 3
+depth_scale: 1000.0
+
+# Keyframe detection
+keyframe_gripper_change: false
+keyframe_velocity_threshold: 0.01
+
+# Quaternion format in eef_states.npy (xArm SDK uses wxyz)
+input_quat_format: wxyz

@@ -229,7 +229,7 @@ class BaseTrainTester:
         # Get model
         model = self.get_model()
         self.tokenizer = fetch_tokenizers(self.args.backbone)
-        if not os.path.exists(self.args.checkpoint):
+        if not self.args.checkpoint or not os.path.exists(self.args.checkpoint):
             normalizer = self.get_workspace_normalizer()
             model.workspace_normalizer.copy_(normalizer)
             dist.barrier(device_ids=[torch.cuda.current_device()])
@@ -423,7 +423,7 @@ class BaseTrainTester:
     def load_checkpoint(self, model, ema_model, optimizer):
         """Load from checkpoint."""
         print("=> trying checkpoint '{}'".format(self.args.checkpoint))
-        if not os.path.exists(self.args.checkpoint):
+        if not self.args.checkpoint or not os.path.exists(self.args.checkpoint):
             print('Warning: checkpoint was not found, starting from scratch')
             print('The main process will compute workspace bounds')
             return 0, None
