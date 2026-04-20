@@ -1,0 +1,44 @@
+# evaluation.yaml: Offline MCAP inference config for the C144 fine-tuned checkpoint.
+
+# Model
+model_type: denoise3d
+backbone: clip
+bimanual: false
+embedding_dim: 144
+num_attn_heads: 8
+num_vis_instr_attn_layers: 2
+num_shared_attn_layers: 4
+num_history: 3
+fps_subsampling_factor: 4
+rotation_format: quat_xyzw
+denoise_timesteps: 5
+denoise_model: rectified_flow
+relative_action: false
+finetune_backbone: false
+finetune_text_encoder: false
+
+# Checkpoint
+checkpoint: train_logs/XArm/default_task-denoise3d-C144-B16-rectified_flow-ft/best.pth
+
+# Offline inference
+bag_dir: data/xarm/default_task
+output_dir: evaluation/results/mcap_inference
+val_episodes: [9, 20, 32]
+instruction: "do the task"
+target_hz: 10.0
+sync_slop: 0.05
+depth_scale: 1000.0
+image_size: 256
+
+# Topic mapping (must match source MCAP bags)
+topics:
+  front_rgb: /front/color/image_raw
+  front_depth: /front/depth/image_raw
+  front_info: /front/camera_info
+  front_pose: /front/pose
+  wrist_rgb: /wrist/color/image_raw
+  wrist_depth: /wrist/depth/image_raw
+  wrist_info: /wrist/camera_info
+  wrist_pose: /wrist/pose
+  eef_pose: /eef_pose
+  gripper: /gripper_position
