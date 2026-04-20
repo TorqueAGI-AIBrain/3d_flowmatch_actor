@@ -1,0 +1,24 @@
+# docker/requirements.txt: Python dependencies for 3D FlowMatch Actor.
+
+# Core training
+einops
+tqdm
+zarr<3
+numcodecs
+diffusers
+kornia
+tensorboard
+pyyaml
+scipy
+matplotlib
+
+# MCAP / ROS2 bag reading & writing
+mcap
+rosbags==0.9.23
+
+# Vision backbone
+git+https://github.com/openai/CLIP.git
+
+# Visualization / evaluation UI
+gradio>=4.0
+plotly

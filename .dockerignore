@@ -2,5 +2,9 @@
 .venv
 __pycache__
 *.pyc
+*.egg-info
 docs/paper.pdf
-train_logs/exp
+train_logs/
+evaluation/results/
+offline_evaluation/results/
+data/
