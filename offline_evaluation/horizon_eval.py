@@ -306,10 +306,11 @@ def evaluate_episode(ep_idx, cfg, model, tokenizer, depth2cloud, device):
     anchor_indices = list(range(0, N - 1, m))
 
     for anchor in tqdm(anchor_indices, desc="  Segments"):
+        # Seed proprio with last num_history GT poses up to and including anchor
         eef_history = deque(maxlen=num_history)
-        anchor_state = frames[anchor]['eef_pose']
-        for _ in range(num_history):
-            eef_history.append(anchor_state.copy())
+        for k in range(num_history - 1, -1, -1):
+            hist_idx = max(0, anchor - k)
+            eef_history.append(frames[hist_idx]['eef_pose'].copy())
 
         rgbs, pcds, _ = preprocess_frame(
             frames[anchor], episode['front_E'], episode['front_K'],
