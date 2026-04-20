@@ -10,67 +10,105 @@ import torch
 from datasets import fetch_dataset_class
 from modeling.policy import fetch_model_class
 from utils.common_utils import str2bool, str_none
+from utils.config import load_yaml_config
 from utils.trainers import fetch_train_tester
+
+
+# Canonical argument spec: (name, type, default)
+ARGUMENT_SPEC = [
+    # Dataset/loader arguments
+    ('train_data_dir', Path, ''),
+    ('eval_data_dir', Path, ''),
+    ('train_instructions', Path, ''),
+    ('val_instructions', Path, ''),
+    ('dataset', str, "Peract"),
+    ('num_workers', int, 4),
+    ('batch_size', int, 64),
+    ('batch_size_val', int, 64),
+    ('chunk_size', int, 1),
+    ('memory_limit', float, 8),  # cache limit in GB
+    # Logging arguments
+    ('base_log_dir', Path, Path(__file__).parent / "train_logs"),
+    ('exp_log_dir', Path, "exp"),
+    ('run_log_dir', Path, "run"),
+    # Training and testing arguments
+    ('checkpoint', str_none, None),
+    ('val_freq', int, 4000),
+    ('interm_ckpt_freq', int, 1000000),
+    ('eval_only', str2bool, False),
+    ('lr', float, 1e-4),
+    ('backbone_lr', float, 1e-4),
+    ('lr_scheduler', str, "constant"),
+    ('wd', float, 5e-3),
+    ('train_iters', int, 600000),
+    ('use_compile', str2bool, False),
+    ('use_ema', str2bool, False),
+    ('lv2_batch_size', int, 1),
+    # Model arguments: general policy type
+    ('model_type', str, 'denoise3d'),
+    ('bimanual', str2bool, False),
+    ('keypose_only', str2bool, True),
+    ('pre_tokenize', str2bool, True),
+    ('custom_img_size', int, None),
+    ('workspace_normalizer_buffer', float, 0.04),
+    # Model arguments: encoder
+    ('backbone', str, "clip"),
+    ('finetune_backbone', str2bool, False),
+    ('finetune_text_encoder', str2bool, False),
+    ('fps_subsampling_factor', int, 5),
+    # Model arguments: encoder and head
+    ('embedding_dim', int, 120),  # divisible by num_attn_heads
+    ('num_attn_heads', int, 8),
+    ('num_vis_instr_attn_layers', int, 3),
+    ('num_history', int, 1),
+    # Model arguments: head
+    ('num_shared_attn_layers', int, 4),
+    ('relative_action', str2bool, False),
+    ('rotation_format', str, 'quat_xyzw'),
+    ('denoise_timesteps', int, 10),
+    ('denoise_model', str, "rectified_flow")
+]
 
 
 def parse_arguments():
     parser = argparse.ArgumentParser("Parse arguments for main.py")
-    # Tuples: (name, type, default)
-    arguments = [
-        # Dataset/loader arguments
-        ('train_data_dir', Path, ''),
-        ('eval_data_dir', Path, ''),
-        ('train_instructions', Path, ''),
-        ('val_instructions', Path, ''),
-        ('dataset', str, "Peract"),
-        ('num_workers', int, 4),
-        ('batch_size', int, 64),
-        ('batch_size_val', int, 64),
-        ('chunk_size', int, 1),
-        ('memory_limit', float, 8),  # cache limit in GB
-        # Logging arguments
-        ('base_log_dir', Path, Path(__file__).parent / "train_logs"),
-        ('exp_log_dir', Path, "exp"),
-        ('run_log_dir', Path, "run"),
-        # Training and testing arguments
-        ('checkpoint', str_none, None),
-        ('val_freq', int, 4000),
-        ('interm_ckpt_freq', int, 1000000),
-        ('eval_only', str2bool, False),
-        ('lr', float, 1e-4),
-        ('backbone_lr', float, 1e-4),
-        ('lr_scheduler', str, "constant"),
-        ('wd', float, 5e-3),
-        ('train_iters', int, 600000),
-        ('use_compile', str2bool, False),
-        ('use_ema', str2bool, False),
-        ('lv2_batch_size', int, 1),
-        # Model arguments: general policy type
-        ('model_type', str, 'denoise3d'),
-        ('bimanual', str2bool, False),
-        ('keypose_only', str2bool, True),
-        ('pre_tokenize', str2bool, True),
-        ('custom_img_size', int, None),
-        ('workspace_normalizer_buffer', float, 0.04),
-        # Model arguments: encoder
-        ('backbone', str, "clip"),
-        ('finetune_backbone', str2bool, False),
-        ('finetune_text_encoder', str2bool, False),
-        ('fps_subsampling_factor', int, 5),
-        # Model arguments: encoder and head
-        ('embedding_dim', int, 120),  # divisible by num_attn_heads
-        ('num_attn_heads', int, 8),
-        ('num_vis_instr_attn_layers', int, 3),
-        ('num_history', int, 1),
-        # Model arguments: head
-        ('num_shared_attn_layers', int, 4),
-        ('relative_action', str2bool, False),
-        ('rotation_format', str, 'quat_xyzw'),
-        ('denoise_timesteps', int, 10),
-        ('denoise_model', str, "rectified_flow")
-    ]
-    for arg in arguments:
+    parser.add_argument(
+        '--config', type=str, default=None,
+        help='Path to YAML config file. CLI args override config values.'
+    )
+    for arg in ARGUMENT_SPEC:
         parser.add_argument(f'--{arg[0]}', type=arg[1], default=arg[2])
+
+    # Two-pass parse: first check if --config is provided, then merge
+    args, remaining = parser.parse_known_args()
+
+    if args.config is not None:
+        config = load_yaml_config(args.config)
+        from utils.config import flatten_config
+        flat = flatten_config(config)
+
+        # Convert YAML values to types matching argparse expectations
+        spec_types = {name: type_fn for name, type_fn, _ in ARGUMENT_SPEC}
+        typed_defaults = {}
+        for key, value in flat.items():
+            if key not in spec_types:
+                continue
+            type_fn = spec_types[key]
+            if value is None:
+                typed_defaults[key] = None
+            elif type_fn in (str2bool,):
+                typed_defaults[key] = (bool(value) if isinstance(value, bool)
+                                       else str(value).lower() in ('true', '1', 'yes'))
+            elif type_fn == str_none:
+                typed_defaults[key] = (None if value in (None, 'none', '')
+                                       else str(value))
+            elif type_fn == Path:
+                typed_defaults[key] = Path(value)
+            else:
+                typed_defaults[key] = type_fn(value)
+
+        # Set YAML values as defaults, then re-parse so CLI args win
+        parser.set_defaults(**typed_defaults)
 
     return parser.parse_args()
 

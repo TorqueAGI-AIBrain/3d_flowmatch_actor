@@ -6,6 +6,7 @@ from .rlbench import (
     HiveformerDataset
 )
 from .real_arm import RealArmDataset
+from .xarm import XArmDataset
 
 
 def fetch_dataset_class(dataset_name):
@@ -17,6 +18,7 @@ def fetch_dataset_class(dataset_name):
         "PeractTwoCam": PeractTwoCamDataset,
         "HiveformerRLBench": HiveformerDataset,
         "RealArm": RealArmDataset,
+        "XArm": XArmDataset,
     }
 
     if dataset_name not in dataset_classes:

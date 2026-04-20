@@ -1,0 +1,55 @@
+# training.yaml: 3D FlowMatch Actor training config for xArm real arm.
+
+# Dataset / loader
+dataset: XArm
+train_data_dir: data/zarr/train.zarr
+eval_data_dir: data/zarr/val.zarr
+train_instructions: instructions/xarm/instructions.json
+val_instructions: instructions/xarm/instructions.json
+num_workers: 4
+batch_size: 16
+batch_size_val: 16
+chunk_size: 1
+memory_limit: 8
+
+# Logging
+exp_log_dir: XArm
+run_log_dir: denoise3d-XArm-C120-B16-lr1e-4-constant-H3-rectified_flow
+
+# Training
+val_freq: 2000
+eval_only: false
+lr: 1.0e-4
+backbone_lr: 1.0e-6
+lr_scheduler: constant
+wd: 1.0e-10
+train_iters: 100000
+use_compile: false
+use_ema: false
+lv2_batch_size: 1
+
+# Model: policy
+model_type: denoise3d
+bimanual: false
+keypose_only: true
+pre_tokenize: true
+workspace_normalizer_buffer: 0.05
+
+# Model: encoder
+backbone: clip
+finetune_backbone: false
+finetune_text_encoder: false
+fps_subsampling_factor: 4
+
+# Model: dimensions
+embedding_dim: 120
+num_attn_heads: 8
+num_vis_instr_attn_layers: 2
+num_history: 3
+
+# Model: head
+num_shared_attn_layers: 4
+relative_action: false
+rotation_format: quat_xyzw
+denoise_timesteps: 5
+denoise_model: rectified_flow
