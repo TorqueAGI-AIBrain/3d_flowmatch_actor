@@ -1,8 +1,8 @@
 # zarr.yaml: Episode directory to zarr conversion config.
 
 # Input/output paths
-root: data
-tgt: data/zarr
+root: data/xarm/default_task_episodes
+tgt: data/xarm/default_task_zarr
 
 # Tasks to include
 tasks:
@@ -20,11 +20,10 @@ nhand: 1
 val_ratio: 0.1
 trajectory_length: 1  # 1 = keypose only
 num_history: 3
-depth_scale: 1000.0
 
 # Keyframe detection
 keyframe_gripper_change: false
 keyframe_velocity_threshold: 0.01
 
-# Quaternion format in eef_states.npy (xArm SDK uses wxyz)
-input_quat_format: wxyz
+# Quaternion format in eef_states.npy (ROS PoseStamped uses xyzw)
+input_quat_format: xyzw

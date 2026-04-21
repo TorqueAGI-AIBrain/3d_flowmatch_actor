@@ -37,6 +37,9 @@ from data_processing.rlbench_utils import (
 
 
 IM_SIZE = 256
+# Episode depth PNGs are uint16 millimetres (written by bag_to_episodes.py).
+# Divide by this value to convert to metres for the zarr.
+DEPTH_MM_SCALE = 1000.0
 
 
 def parse_arguments():
@@ -76,10 +79,6 @@ def parse_arguments():
         help="Action trajectory length. 1=keypose only, >1=interpolated trajectory"
     )
     parser.add_argument(
-        "--depth_scale", type=float, default=None,
-        help="Divisor to convert raw depth to meters (1000 for mm, 1 if already meters)"
-    )
-    parser.add_argument(
         "--num_history", type=int, default=None,
         help="Number of proprioception history steps"
     )
@@ -110,7 +109,6 @@ def _resolve_args(args):
         'tasks': [],
         'val_ratio': 0.1,
         'trajectory_length': 1,
-        'depth_scale': 1000.0,
         'num_history': 3,
         'keyframe_gripper_change': False,
         'keyframe_velocity_threshold': 0.01,
@@ -158,14 +156,14 @@ def load_rgb(episode_dir, cameras, timestep):
     return np.stack(imgs).astype(np.uint8)  # (ncam, 3, H, W)
 
 
-def load_depth(episode_dir, cameras, timestep, depth_scale):
+def load_depth(episode_dir, cameras, timestep):
     """Load depth maps for all cameras at a given timestep. Returns (ncam, H, W) float16."""
     depths = []
     for cam in cameras:
         path = os.path.join(episode_dir, "depth", f"{cam}_{timestep:04d}.png")
         raw = np.array(Image.open(path))
-        # Convert to meters
-        depth_m = raw.astype(np.float32) / depth_scale
+        # Convert uint16 mm to float32 metres
+        depth_m = raw.astype(np.float32) / DEPTH_MM_SCALE
         # Resize if needed
         if depth_m.shape != (IM_SIZE, IM_SIZE):
             depth_m = np.array(
@@ -348,7 +346,7 @@ def _reorder_cameras(data_cameras, target_cameras, extrinsics, intrinsics):
 
 
 def process_episode(episode_dir, cameras, nhand, num_history, trajectory_length,
-                    depth_scale, keyframe_gripper_change, keyframe_velocity_threshold,
+                    keyframe_gripper_change, keyframe_velocity_threshold,
                     input_quat_format='wxyz'):
     """
     Process a single episode directory into arrays ready for zarr.
@@ -428,7 +426,7 @@ def process_episode(episode_dir, cameras, nhand, num_history, trajectory_length,
     depths = []
     for kf in obs_keyframes:
         rgb = load_rgb(episode_dir, load_cam_names, kf)
-        dep = load_depth(episode_dir, load_cam_names, kf, depth_scale)
+        dep = load_depth(episode_dir, load_cam_names, kf)
         if cam_reorder_map is not None:
             rgb = rgb[cam_reorder_map]
             dep = dep[cam_reorder_map]
@@ -572,7 +570,7 @@ def main():
 
             data = process_episode(
                 episode_dir, args.cameras, args.nhand, args.num_history,
-                args.trajectory_length, args.depth_scale,
+                args.trajectory_length,
                 args.keyframe_gripper_change, args.keyframe_velocity_threshold,
                 input_quat_format=args.input_quat_format
             )
