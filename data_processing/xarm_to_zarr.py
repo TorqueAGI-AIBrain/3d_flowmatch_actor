@@ -94,7 +94,7 @@ def parse_arguments():
     parser.add_argument(
         "--input_quat_format", type=str, default=None,
         choices=["wxyz", "xyzw"],
-        help="Quaternion format in eef_states.npy. Default: auto-detect from data."
+        help="Quaternion format in eef_states.npy (required)"
     )
     return parser.parse_args()
 
@@ -114,7 +114,7 @@ def _resolve_args(args):
         'num_history': 3,
         'keyframe_gripper_change': False,
         'keyframe_velocity_threshold': 0.01,
-        'input_quat_format': 'wxyz',
+        'input_quat_format': None,  # required: 'wxyz' or 'xyzw'
     }
 
     if args.config is not None:
@@ -294,20 +294,6 @@ def build_actions(eef_states, keyframes, trajectory_length, nhand):
     return np.stack(actions).astype(np.float32)  # (num_samples, T, nhand, 8)
 
 
-def _detect_quat_format(eef_states):
-    """
-    Auto-detect quaternion format from eef_states.
-    If column 3 (first quat component) has values consistently close to 1.0,
-    it's likely the w component, meaning wxyz format.
-    """
-    quats = eef_states[:, 3:7]
-    col3_mean = np.abs(quats[:, 0]).mean()
-    col6_mean = np.abs(quats[:, 3]).mean()
-    # The w component is typically the largest (close to 1 for small rotations)
-    if col3_mean > col6_mean:
-        return 'wxyz'
-    return 'xyzw'
-
 
 def _convert_quat_wxyz_to_xyzw(eef_states):
     """Convert quaternion columns from [w,x,y,z] to [x,y,z,w] in-place."""
@@ -383,10 +369,10 @@ def process_episode(episode_dir, cameras, nhand, num_history, trajectory_length,
         print(f"  Skipping {episode_dir}: too few timesteps ({T})")
         return None
 
-    # Auto-detect or use specified quaternion format, convert to xyzw
-    detected_fmt = _detect_quat_format(eef_states)
-    quat_fmt = input_quat_format if input_quat_format != 'auto' else detected_fmt
-    if quat_fmt == 'wxyz':
+    # Convert quaternion format to xyzw if needed
+    if not input_quat_format:
+        raise ValueError("input_quat_format is required (wxyz or xyzw)")
+    if input_quat_format == 'wxyz':
         eef_states = _convert_quat_wxyz_to_xyzw(eef_states)
 
     # Load camera parameters (constant across episode)
