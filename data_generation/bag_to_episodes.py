@@ -262,12 +262,22 @@ def process_bag(bag_path, config):
             print(f"  Skipping {bag_path}: duration too short")
             return None
 
-        # Extract camera intrinsics (use first message from each camera)
+        # Extract camera intrinsics, scaled to im_size x im_size.
+        # CameraInfo K is for the original resolution; images are resized
+        # to im_size so K must be scaled to match.
         intrinsics = np.zeros((ncam, 3, 3), dtype=np.float32)
         for i, cam_name in enumerate(cam_names):
             info_msgs = msgs[cameras[cam_name]['camera_info_topic']]
+            rgb_msgs = msgs[cameras[cam_name]['rgb_topic']]
             if info_msgs:
-                intrinsics[i] = _decode_camera_info(info_msgs[0][1])
+                K = _decode_camera_info(info_msgs[0][1])
+                if rgb_msgs:
+                    orig_w, orig_h = rgb_msgs[0][1].width, rgb_msgs[0][1].height
+                    K[0, 0] *= im_size / orig_w   # fx
+                    K[1, 1] *= im_size / orig_h   # fy
+                    K[0, 2] *= im_size / orig_w   # cx
+                    K[1, 2] *= im_size / orig_h   # cy
+                intrinsics[i] = K
             else:
                 print(f"  Warning: no CameraInfo for {cam_name}")
 
