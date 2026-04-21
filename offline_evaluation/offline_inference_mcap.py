@@ -248,19 +248,18 @@ def read_episode_bag(bag_dir, topics, target_hz, sync_slop):
     front_pose_msgs = msgs[topics['front_pose']]
     front_E = pose_7d_to_4x4(_decode_pose(front_pose_msgs[0][1]))
 
+    # Scale intrinsics from original resolution to IM_SIZE
     front_info_msgs = msgs[topics['front_info']]
     wrist_info_msgs = msgs[topics['wrist_info']]
-    front_K_raw = _decode_camera_info(front_info_msgs[0][1])
-    wrist_K_raw = _decode_camera_info(wrist_info_msgs[0][1])
-
-    # Get original image dimensions from first RGB message
     first_front_rgb_msg = msgs[topics['front_rgb']][0][1]
     first_wrist_rgb_msg = msgs[topics['wrist_rgb']][0][1]
     front_K = scale_intrinsics(
-        front_K_raw, first_front_rgb_msg.width, first_front_rgb_msg.height, IM_SIZE
+        _decode_camera_info(front_info_msgs[0][1]),
+        first_front_rgb_msg.width, first_front_rgb_msg.height, IM_SIZE
     )
     wrist_K = scale_intrinsics(
-        wrist_K_raw, first_wrist_rgb_msg.width, first_wrist_rgb_msg.height, IM_SIZE
+        _decode_camera_info(wrist_info_msgs[0][1]),
+        first_wrist_rgb_msg.width, first_wrist_rgb_msg.height, IM_SIZE
     )
 
     # Synchronize frames

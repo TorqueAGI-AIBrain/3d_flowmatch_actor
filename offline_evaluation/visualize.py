@@ -44,9 +44,18 @@ def load_results(results_dir):
                 'errors': data[f'seg{i}_errors'],
             })
             i += 1
+        # Load point clouds if available
+        pcd_data = {}
+        if 'front_pts' in data:
+            pcd_data['front_pts'] = data['front_pts']
+            pcd_data['front_rgb'] = data['front_rgb']
+            pcd_data['wrist_pts'] = data['wrist_pts']
+            pcd_data['wrist_rgb'] = data['wrist_rgb']
+
         results[ep_idx] = {
             'gt_all': gt_all, 'segments': segments,
             'horizon': horizon, 'path': path,
+            **pcd_data,
         }
     return results
 
@@ -192,6 +201,47 @@ def build_per_segment_figure(result):
     return fig
 
 
+def build_pcd_figure(result, show_front=True, show_wrist=True):
+    """Build a separate 3D figure for point cloud visualization."""
+    fig = go.Figure()
+
+    def _add(pts, rgb, name, visible):
+        if pts is None or not visible:
+            return
+        colors = [f'rgb({r},{g},{b})' for r, g, b in rgb]
+        fig.add_trace(go.Scatter3d(
+            x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
+            mode='markers',
+            marker=dict(size=1.5, color=colors, opacity=0.7),
+            name=name,
+            hovertemplate='x=%{x:.3f}<br>y=%{y:.3f}<br>z=%{z:.3f}',
+        ))
+
+    _add(result.get('front_pts'), result.get('front_rgb'), 'Front camera', show_front)
+    _add(result.get('wrist_pts'), result.get('wrist_rgb'), 'Wrist camera', show_wrist)
+
+    # Add EEF trajectory as reference
+    gt_all = result['gt_all']
+    gt_pos = gt_all[:, :3]
+    fig.add_trace(go.Scatter3d(
+        x=gt_pos[:, 0], y=gt_pos[:, 1], z=gt_pos[:, 2],
+        mode='markers',
+        marker=dict(size=4, color='#00ff88', symbol='diamond',
+                    line=dict(color='black', width=1)),
+        name='EEF trajectory',
+    ))
+
+    has_pcd = result.get('front_pts') is not None
+    fig.update_layout(
+        scene=dict(xaxis_title='X (m)', yaxis_title='Y (m)', zaxis_title='Z (m)',
+                   aspectmode='data'),
+        title='Point Cloud — Last Frame' if has_pcd else 'No point cloud data',
+        width=900, height=700,
+        margin=dict(l=0, r=0, t=40, b=0),
+    )
+    return fig
+
+
 # ---------------------------------------------------------------------------
 # Gradio app
 # ---------------------------------------------------------------------------
@@ -203,10 +253,12 @@ def create_app(results_dir):
 
     episode_choices = sorted(results.keys())
 
-    def update_plots(ep_idx, show_gt_line, show_segments, show_error_lines):
+    def update_all(ep_idx, show_gt_line, show_segments, show_error_lines,
+                   show_front_pcd, show_wrist_pcd):
         ep_idx = int(ep_idx)
         r = results[ep_idx]
         fig_3d = build_3d_figure(r, show_gt_line, show_segments, show_error_lines)
+        fig_pcd = build_pcd_figure(r, show_front_pcd, show_wrist_pcd)
         fig_bar = build_error_bar_figure(r)
         fig_seg = build_per_segment_figure(r)
 
@@ -222,7 +274,7 @@ def create_app(results_dir):
             f"| Step-1 error | {np.mean(step1_errs):.2f} cm |\n"
             f"| Std | {all_errors.std():.2f} cm |\n"
         )
-        return fig_3d, fig_bar, fig_seg, summary
+        return fig_3d, fig_pcd, fig_bar, fig_seg, summary
 
     with gr.Blocks(title="3DFA Horizon Evaluation") as app:
         gr.Markdown("# 3DFA Horizon Evaluation Viewer")
@@ -236,26 +288,27 @@ def create_app(results_dir):
                 choices=[str(e) for e in episode_choices],
                 value=str(episode_choices[0]), label="Episode",
             )
-            show_gt = gr.Checkbox(value=True, label="Show GT path line")
-            show_segs = gr.Checkbox(value=True, label="Show predicted segments")
-            show_err = gr.Checkbox(value=False, label="Show error lines (pred->GT)")
+            show_gt = gr.Checkbox(value=True, label="GT path line")
+            show_segs = gr.Checkbox(value=True, label="Predicted segments")
+            show_err = gr.Checkbox(value=False, label="Error lines")
+            show_front = gr.Checkbox(value=True, label="Front PCD")
+            show_wrist = gr.Checkbox(value=True, label="Wrist PCD")
 
         summary_md = gr.Markdown()
 
         with gr.Row():
             plot_3d = gr.Plot(label="3D Trajectory")
+            plot_pcd = gr.Plot(label="Point Cloud (last frame)")
         with gr.Row():
             plot_bar = gr.Plot(label="Error vs Rollout Step")
             plot_seg = gr.Plot(label="Error per Segment")
 
-        inputs = [ep_dropdown, show_gt, show_segs, show_err]
-        outputs = [plot_3d, plot_bar, plot_seg, summary_md]
+        inputs = [ep_dropdown, show_gt, show_segs, show_err, show_front, show_wrist]
+        outputs = [plot_3d, plot_pcd, plot_bar, plot_seg, summary_md]
 
-        ep_dropdown.change(update_plots, inputs, outputs)
-        show_gt.change(update_plots, inputs, outputs)
-        show_segs.change(update_plots, inputs, outputs)
-        show_err.change(update_plots, inputs, outputs)
-        app.load(update_plots, inputs, outputs)
+        for inp in inputs:
+            inp.change(update_all, inputs, outputs)
+        app.load(update_all, inputs, outputs)
 
     return app
 

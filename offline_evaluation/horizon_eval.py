@@ -205,10 +205,19 @@ def read_episode_bag(bag_dir, topics, target_hz=10.0, sync_slop=0.05):
     wrist_info = msgs[topics['wrist_info']][0][1]
     first_front_rgb = msgs[topics['front_rgb']][0][1]
     first_wrist_rgb = msgs[topics['wrist_rgb']][0][1]
+    # Scale intrinsics from original resolution to 256x256.
+    # Training zarr has a bug: stores full-res K with 256x256 images.
+    # We scale correctly here for proper point clouds; pass raw K to model
+    # via a separate code path if needed to match training distribution.
+    first_front_rgb = msgs[topics['front_rgb']][0][1]
+    first_wrist_rgb = msgs[topics['wrist_rgb']][0][1]
     front_K = scale_intrinsics(_decode_camera_info(front_info),
                                first_front_rgb.width, first_front_rgb.height, IM_SIZE)
     wrist_K = scale_intrinsics(_decode_camera_info(wrist_info),
                                first_wrist_rgb.width, first_wrist_rgb.height, IM_SIZE)
+    # Also keep raw K for model inference (matches training bug)
+    front_K_raw = _decode_camera_info(front_info)
+    wrist_K_raw = _decode_camera_info(wrist_info)
 
     gripper_msgs = msgs.get(topics['gripper'], [])
     frames = []
@@ -235,7 +244,11 @@ def read_episode_bag(bag_dir, topics, target_hz=10.0, sync_slop=0.05):
         })
     if len(frames) < 2:
         return None
-    return {'frames': frames, 'front_E': front_E, 'front_K': front_K, 'wrist_K': wrist_K}
+    return {
+        'frames': frames, 'front_E': front_E,
+        'front_K': front_K, 'wrist_K': wrist_K,           # scaled for viz PCD
+        'front_K_raw': front_K_raw, 'wrist_K_raw': wrist_K_raw,  # raw for model
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +265,8 @@ def preprocess_frame(frame, front_E, front_K, wrist_K, eef_history,
     ])
     rgbs = torch.from_numpy(rgbs).unsqueeze(0).to(device)
 
+    # Depth is already in metres (32FC1) or needs scaling (16UC1 in mm).
+    # depth_scale=1.0 for 32FC1, depth_scale=1000.0 for 16UC1.
     f_d = cv2.resize(frame['front_depth'].astype(np.float32), (IM_SIZE, IM_SIZE),
                      interpolation=cv2.INTER_NEAREST) / depth_scale
     w_d = cv2.resize(frame['wrist_depth'].astype(np.float32), (IM_SIZE, IM_SIZE),
@@ -312,9 +327,10 @@ def evaluate_episode(ep_idx, cfg, model, tokenizer, depth2cloud, device):
             hist_idx = max(0, anchor - k)
             eef_history.append(frames[hist_idx]['eef_pose'].copy())
 
+        # Use raw (unscaled) K for model — matches training bug
         rgbs, pcds, _ = preprocess_frame(
-            frames[anchor], episode['front_E'], episode['front_K'],
-            episode['wrist_K'], eef_history, depth2cloud, depth_scale, device,
+            frames[anchor], episode['front_E'], episode['front_K_raw'],
+            episode['wrist_K_raw'], eef_history, depth2cloud, depth_scale, device,
         )
 
         seg_preds, seg_gt, seg_errors = [], [], []
@@ -346,9 +362,43 @@ def evaluate_episode(ep_idx, cfg, model, tokenizer, depth2cloud, device):
                 'errors': np.array(seg_errors),
             })
 
+    # Extract last frame's point clouds for visualization
+    last_frame = frames[-1]
+    eef_history_last = deque(maxlen=num_history)
+    for k in range(num_history - 1, -1, -1):
+        eef_history_last.append(frames[max(0, N - 1 - k)]['eef_pose'].copy())
+
+    rgbs_last, pcds_last, _ = preprocess_frame(
+        last_frame, episode['front_E'], episode['front_K'],
+        episode['wrist_K'], eef_history_last, depth2cloud, depth_scale, device,
+    )
+    pcds_np = pcds_last[0].cpu().float().numpy()     # (2, 3, 256, 256)
+    rgbs_np = rgbs_last[0].cpu().float().numpy()     # (2, 3, 256, 256)
+
+    # Front camera point cloud + colors
+    front_pts = pcds_np[0].reshape(3, -1).T           # (N, 3)
+    front_rgb = (rgbs_np[0].reshape(3, -1).T * 255).astype(np.uint8)
+    # Wrist camera point cloud + colors
+    wrist_pts = pcds_np[1].reshape(3, -1).T
+    wrist_rgb = (rgbs_np[1].reshape(3, -1).T * 255).astype(np.uint8)
+
+    # Filter invalid points and subsample for visualization
+    def _filter_subsample(pts, colors, max_points=5000):
+        valid = np.isfinite(pts).all(axis=1) & (np.abs(pts) < 10.0).all(axis=1)
+        pts, colors = pts[valid], colors[valid]
+        if len(pts) > max_points:
+            idx = np.random.RandomState(0).choice(len(pts), max_points, replace=False)
+            pts, colors = pts[idx], colors[idx]
+        return pts, colors
+
+    front_pts, front_rgb = _filter_subsample(front_pts, front_rgb)
+    wrist_pts, wrist_rgb = _filter_subsample(wrist_pts, wrist_rgb)
+
     return {
         'episode': ep_idx, 'num_frames': N, 'horizon': m,
         'gt_all': gt_all, 'segments': segments,
+        'front_pts': front_pts, 'front_rgb': front_rgb,
+        'wrist_pts': wrist_pts, 'wrist_rgb': wrist_rgb,
     }
 
 
@@ -463,6 +513,8 @@ def main():
         npz_path = os.path.join(output_dir, f'episode_{ep_idx}_horizon_m{cfg["horizon"]}.npz')
         np.savez_compressed(
             npz_path, gt_all=result['gt_all'],
+            front_pts=result['front_pts'], front_rgb=result['front_rgb'],
+            wrist_pts=result['wrist_pts'], wrist_rgb=result['wrist_rgb'],
             **{f'seg{i}_anchor': s['anchor_pos'] for i, s in enumerate(result['segments'])},
             **{f'seg{i}_preds': s['preds'] for i, s in enumerate(result['segments'])},
             **{f'seg{i}_gt': s['gt'] for i, s in enumerate(result['segments'])},
