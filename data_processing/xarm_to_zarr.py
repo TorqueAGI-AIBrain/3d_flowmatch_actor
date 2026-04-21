@@ -37,6 +37,9 @@ from data_processing.rlbench_utils import (
 
 
 IM_SIZE = 256
+# Episode depth PNGs are uint16 millimetres (written by bag_to_episodes.py).
+# Divide by this value to convert to metres for the zarr.
+DEPTH_MM_SCALE = 1000.0
 
 
 def parse_arguments():
@@ -76,10 +79,6 @@ def parse_arguments():
         help="Action trajectory length. 1=keypose only, >1=interpolated trajectory"
     )
     parser.add_argument(
-        "--depth_scale", type=float, default=None,
-        help="Divisor to convert raw depth to meters (1000 for mm, 1 if already meters)"
-    )
-    parser.add_argument(
         "--num_history", type=int, default=None,
         help="Number of proprioception history steps"
     )
@@ -94,7 +93,7 @@ def parse_arguments():
     parser.add_argument(
         "--input_quat_format", type=str, default=None,
         choices=["wxyz", "xyzw"],
-        help="Quaternion format in eef_states.npy. Default: auto-detect from data."
+        help="Quaternion format in eef_states.npy (required)"
     )
     return parser.parse_args()
 
@@ -110,11 +109,10 @@ def _resolve_args(args):
         'tasks': [],
         'val_ratio': 0.1,
         'trajectory_length': 1,
-        'depth_scale': 1000.0,
         'num_history': 3,
         'keyframe_gripper_change': False,
         'keyframe_velocity_threshold': 0.01,
-        'input_quat_format': 'wxyz',
+        'input_quat_format': None,  # required: 'wxyz' or 'xyzw'
     }
 
     if args.config is not None:
@@ -158,14 +156,14 @@ def load_rgb(episode_dir, cameras, timestep):
     return np.stack(imgs).astype(np.uint8)  # (ncam, 3, H, W)
 
 
-def load_depth(episode_dir, cameras, timestep, depth_scale):
+def load_depth(episode_dir, cameras, timestep):
     """Load depth maps for all cameras at a given timestep. Returns (ncam, H, W) float16."""
     depths = []
     for cam in cameras:
         path = os.path.join(episode_dir, "depth", f"{cam}_{timestep:04d}.png")
         raw = np.array(Image.open(path))
-        # Convert to meters
-        depth_m = raw.astype(np.float32) / depth_scale
+        # Convert uint16 mm to float32 metres
+        depth_m = raw.astype(np.float32) / DEPTH_MM_SCALE
         # Resize if needed
         if depth_m.shape != (IM_SIZE, IM_SIZE):
             depth_m = np.array(
@@ -294,20 +292,6 @@ def build_actions(eef_states, keyframes, trajectory_length, nhand):
     return np.stack(actions).astype(np.float32)  # (num_samples, T, nhand, 8)
 
 
-def _detect_quat_format(eef_states):
-    """
-    Auto-detect quaternion format from eef_states.
-    If column 3 (first quat component) has values consistently close to 1.0,
-    it's likely the w component, meaning wxyz format.
-    """
-    quats = eef_states[:, 3:7]
-    col3_mean = np.abs(quats[:, 0]).mean()
-    col6_mean = np.abs(quats[:, 3]).mean()
-    # The w component is typically the largest (close to 1 for small rotations)
-    if col3_mean > col6_mean:
-        return 'wxyz'
-    return 'xyzw'
-
 
 def _convert_quat_wxyz_to_xyzw(eef_states):
     """Convert quaternion columns from [w,x,y,z] to [x,y,z,w] in-place."""
@@ -362,7 +346,7 @@ def _reorder_cameras(data_cameras, target_cameras, extrinsics, intrinsics):
 
 
 def process_episode(episode_dir, cameras, nhand, num_history, trajectory_length,
-                    depth_scale, keyframe_gripper_change, keyframe_velocity_threshold,
+                    keyframe_gripper_change, keyframe_velocity_threshold,
                     input_quat_format='wxyz'):
     """
     Process a single episode directory into arrays ready for zarr.
@@ -383,10 +367,10 @@ def process_episode(episode_dir, cameras, nhand, num_history, trajectory_length,
         print(f"  Skipping {episode_dir}: too few timesteps ({T})")
         return None
 
-    # Auto-detect or use specified quaternion format, convert to xyzw
-    detected_fmt = _detect_quat_format(eef_states)
-    quat_fmt = input_quat_format if input_quat_format != 'auto' else detected_fmt
-    if quat_fmt == 'wxyz':
+    # Convert quaternion format to xyzw if needed
+    if not input_quat_format:
+        raise ValueError("input_quat_format is required (wxyz or xyzw)")
+    if input_quat_format == 'wxyz':
         eef_states = _convert_quat_wxyz_to_xyzw(eef_states)
 
     # Load camera parameters (constant across episode)
@@ -442,7 +426,7 @@ def process_episode(episode_dir, cameras, nhand, num_history, trajectory_length,
     depths = []
     for kf in obs_keyframes:
         rgb = load_rgb(episode_dir, load_cam_names, kf)
-        dep = load_depth(episode_dir, load_cam_names, kf, depth_scale)
+        dep = load_depth(episode_dir, load_cam_names, kf)
         if cam_reorder_map is not None:
             rgb = rgb[cam_reorder_map]
             dep = dep[cam_reorder_map]
@@ -586,7 +570,7 @@ def main():
 
             data = process_episode(
                 episode_dir, args.cameras, args.nhand, args.num_history,
-                args.trajectory_length, args.depth_scale,
+                args.trajectory_length,
                 args.keyframe_gripper_change, args.keyframe_velocity_threshold,
                 input_quat_format=args.input_quat_format
             )

@@ -55,6 +55,9 @@ from utils.config import load_yaml_config, flatten_config
 
 
 IM_SIZE = 256
+# Episode depth PNGs are stored as uint16 millimetres.
+# xarm_to_zarr.py divides by the same value to convert back to metres.
+DEPTH_MM_SCALE = 1000.0
 
 
 def parse_arguments():
@@ -71,7 +74,6 @@ def parse_arguments():
     parser.add_argument("--target_hz", type=float, default=None)
     parser.add_argument("--image_size", type=int, default=None)
     parser.add_argument("--sync_slop", type=float, default=None)
-    parser.add_argument("--depth_scale", type=float, default=None)
     return parser.parse_args()
 
 
@@ -80,7 +82,7 @@ def load_extraction_config(args):
     config = load_yaml_config(args.config)
     # Apply direct CLI overrides
     for key in ['bag_dir', 'output_dir', 'target_hz', 'image_size',
-                'sync_slop', 'depth_scale']:
+                'sync_slop']:
         cli_val = getattr(args, key, None)
         if cli_val is not None:
             config[key] = cli_val
@@ -223,7 +225,6 @@ def process_bag(bag_path, config):
     im_size = config.get('image_size', IM_SIZE)
     target_hz = config.get('target_hz', 10.0)
     sync_slop = config.get('sync_slop', 0.05)
-    depth_scale = config.get('depth_scale', 1000.0)
     eef_topic = config['robot']['eef_topic']
     gripper_topic = config['robot']['gripper_topic']
     world_frame = config['robot']['world_frame']
@@ -262,12 +263,22 @@ def process_bag(bag_path, config):
             print(f"  Skipping {bag_path}: duration too short")
             return None
 
-        # Extract camera intrinsics (use first message from each camera)
+        # Extract camera intrinsics, scaled to im_size x im_size.
+        # CameraInfo K is for the original resolution; images are resized
+        # to im_size so K must be scaled to match.
         intrinsics = np.zeros((ncam, 3, 3), dtype=np.float32)
         for i, cam_name in enumerate(cam_names):
             info_msgs = msgs[cameras[cam_name]['camera_info_topic']]
+            rgb_msgs = msgs[cameras[cam_name]['rgb_topic']]
             if info_msgs:
-                intrinsics[i] = _decode_camera_info(info_msgs[0][1])
+                K = _decode_camera_info(info_msgs[0][1])
+                if rgb_msgs:
+                    orig_w, orig_h = rgb_msgs[0][1].width, rgb_msgs[0][1].height
+                    K[0, 0] *= im_size / orig_w   # fx
+                    K[1, 1] *= im_size / orig_h   # fy
+                    K[0, 2] *= im_size / orig_w   # cx
+                    K[1, 2] *= im_size / orig_h   # cy
+                intrinsics[i] = K
             else:
                 print(f"  Warning: no CameraInfo for {cam_name}")
 
@@ -353,7 +364,7 @@ def process_bag(bag_path, config):
         }
 
 
-def save_episode(data, episode_dir, cam_names, depth_scale):
+def save_episode(data, episode_dir, cam_names):
     """Save extracted episode data to the standard directory structure."""
     os.makedirs(episode_dir, exist_ok=True)
     rgb_dir = os.path.join(episode_dir, 'rgb')
@@ -370,10 +381,12 @@ def save_episode(data, episode_dir, cam_names, depth_scale):
                 os.path.join(rgb_dir, f'{cam_name}_{t:04d}.png'),
                 cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
             )
-            # Save depth as 16-bit PNG (millimeters)
+            # Save depth as uint16 PNG in millimetres.
+            # Convention: episode depth PNGs are always uint16 mm.
+            # xarm_to_zarr.py divides by 1000 to convert back to metres.
             depth = data['depths'][t][c]
             if depth.dtype == np.float32:
-                depth_mm = (depth * depth_scale).astype(np.uint16)
+                depth_mm = (depth * DEPTH_MM_SCALE).astype(np.uint16)
             elif depth.dtype == np.uint16:
                 depth_mm = depth
             else:
@@ -412,7 +425,6 @@ def main():
     output_dir = config['output_dir']
     tasks = config['tasks']
     cam_names = list(config['cameras'].keys())
-    depth_scale = config.get('depth_scale', 1000.0)
 
     total_episodes = 0
 
@@ -440,7 +452,7 @@ def main():
             if data is None:
                 continue
 
-            save_episode(data, episode_dir, cam_names, depth_scale)
+            save_episode(data, episode_dir, cam_names)
             total_episodes += 1
             print(f"    Saved episode_{ep_idx}: {len(data['eef_states'])} frames")
 
