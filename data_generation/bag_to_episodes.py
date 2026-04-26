@@ -42,14 +42,8 @@ import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 
-try:
-    from rosbags.highlevel import AnyReader
-    from rosbags.typesys import Stores, get_typestore
-except ImportError:
-    raise ImportError(
-        "rosbags is required for bag extraction. "
-        "Install with: pip install rosbags"
-    )
+from mcap.reader import make_reader as _make_mcap_reader
+from rosbags.typesys import Stores, get_typestore
 
 from utils.config import load_yaml_config, flatten_config
 
@@ -74,6 +68,8 @@ def parse_arguments():
     parser.add_argument("--target_hz", type=float, default=None)
     parser.add_argument("--image_size", type=int, default=None)
     parser.add_argument("--sync_slop", type=float, default=None)
+    parser.add_argument("--episodes", type=str, default=None,
+                        help="Comma-separated episode indices to extract (e.g. '0,5,10')")
     return parser.parse_args()
 
 
@@ -163,52 +159,99 @@ def _resize_image(img, target_size):
     return cv2.resize(img, (target_size, target_size), interpolation=interp)
 
 
-def _compute_extrinsics_from_tf(reader, typestore, cam_frame, world_frame):
+def _make_mat(trans, quat):
+    """Build a 4x4 matrix from translation + quaternion (xyzw)."""
+    from scipy.spatial.transform import Rotation as R
+    m = np.eye(4, dtype=np.float32)
+    m[:3, :3] = R.from_quat(quat).as_matrix()
+    m[:3, 3] = trans
+    return m
+
+
+def _read_all_tf(mcap_path, typestore):
+    """Read all TF data from an MCAP file.
+
+    Returns:
+        tf_static: dict of (parent, child) -> (trans, quat)
+        tf_dynamic: dict of (parent, child) -> [(timestamp, trans, quat), ...]
     """
-    Try to extract a static transform from the bag's /tf_static topic.
-    Returns (4, 4) cam-to-world matrix, or None if not found.
+    tf_static = {}
+    tf_dynamic = {}
+    with open(mcap_path, 'rb') as f:
+        reader = _make_mcap_reader(f)
+        for schema, channel, message in reader.iter_messages():
+            if channel.topic not in ('/tf_static', '/tf'):
+                continue
+            msg = typestore.deserialize_cdr(message.data, schema.name)
+            t_sec = message.log_time / 1e9
+            for t in msg.transforms:
+                parent = t.header.frame_id.strip('/')
+                child = t.child_frame_id.strip('/')
+                tr = t.transform.translation
+                rot = t.transform.rotation
+                trans = np.array([tr.x, tr.y, tr.z], np.float32)
+                quat = np.array([rot.x, rot.y, rot.z, rot.w], np.float32)
+
+                if channel.topic == '/tf_static':
+                    tf_static[(parent, child)] = (trans, quat)
+                else:
+                    key = (parent, child)
+                    if key not in tf_dynamic:
+                        tf_dynamic[key] = []
+                    tf_dynamic[key].append((t_sec, trans, quat))
+    return tf_static, tf_dynamic
+
+
+def _lookup_dynamic_tf(tf_dynamic, pair, target_time):
+    """Find the closest dynamic TF to target_time. Returns (trans, quat, dt)."""
+    entry = min(tf_dynamic[pair], key=lambda x: abs(x[0] - target_time))
+    dt = abs(entry[0] - target_time)
+    return entry[1], entry[2], dt
+
+
+def _compute_tf_chain(tf_static, tf_dynamic, chain, target_time):
+    """Compute a chained transform at a specific timestamp.
+
+    chain: list of (parent, child) pairs. Each pair is looked up in
+           tf_dynamic first (time-synced), then tf_static.
+    Returns (4x4 matrix, max_dt) where max_dt is the worst time sync delta.
     """
-    tf_topics = ['/tf_static']
-    for topic in tf_topics:
-        if topic not in [c.topic for c in reader.connections]:
-            continue
-        connections = [c for c in reader.connections if c.topic == topic]
-        for connection, timestamp, rawdata in reader.messages(connections=connections):
-            msg = typestore.deserialize_cdr(rawdata, connection.msgtype)
-            for transform in msg.transforms:
-                if (transform.child_frame_id.strip('/') == cam_frame.strip('/')
-                        and transform.header.frame_id.strip('/') == world_frame.strip('/')):
-                    t = transform.transform.translation
-                    r = transform.transform.rotation
-                    # Build 4x4 matrix
-                    from scipy.spatial.transform import Rotation as R
-                    rot = R.from_quat([r.x, r.y, r.z, r.w]).as_matrix()
-                    mat = np.eye(4, dtype=np.float32)
-                    mat[:3, :3] = rot
-                    mat[:3, 3] = [t.x, t.y, t.z]
-                    return mat
-                # Also check inverse direction
-                if (transform.header.frame_id.strip('/') == cam_frame.strip('/')
-                        and transform.child_frame_id.strip('/') == world_frame.strip('/')):
-                    t = transform.transform.translation
-                    r = transform.transform.rotation
-                    from scipy.spatial.transform import Rotation as R
-                    rot = R.from_quat([r.x, r.y, r.z, r.w]).as_matrix()
-                    mat = np.eye(4, dtype=np.float32)
-                    mat[:3, :3] = rot
-                    mat[:3, 3] = [t.x, t.y, t.z]
-                    return np.linalg.inv(mat)
+    T = np.eye(4, dtype=np.float32)
+    max_dt = 0.0
+    for pair in chain:
+        if pair in tf_dynamic:
+            trans, quat, dt = _lookup_dynamic_tf(tf_dynamic, pair, target_time)
+            max_dt = max(max_dt, dt)
+        elif pair in tf_static:
+            trans, quat = tf_static[pair]
+        else:
+            raise KeyError(f"TF pair {pair} not found in static or dynamic")
+        T = T @ _make_mat(trans, quat)
+    return T, max_dt
+
+
+def _compute_static_extrinsic(tf_static, cam_frame, world_frame):
+    """Look up a direct static transform world_frame -> cam_frame."""
+    if (world_frame, cam_frame) in tf_static:
+        trans, quat = tf_static[(world_frame, cam_frame)]
+        return _make_mat(trans, quat)
+    if (cam_frame, world_frame) in tf_static:
+        trans, quat = tf_static[(cam_frame, world_frame)]
+        return np.linalg.inv(_make_mat(trans, quat))
     return None
 
 
-def _collect_messages_by_topic(reader, typestore, topics):
-    """Read all messages from given topics, return dict of {topic: [(time_sec, decoded_msg)]}."""
+def _collect_messages_by_topic(mcap_path, typestore, topics):
+    """Read all messages from given topics using mcap reader.
+    Returns dict of {topic: [(time_sec, decoded_msg)]}."""
     result = {t: [] for t in topics}
-    connections = [c for c in reader.connections if c.topic in topics]
-    for connection, timestamp, rawdata in reader.messages(connections=connections):
-        msg = typestore.deserialize_cdr(rawdata, connection.msgtype)
-        t_sec = _nanosec_to_sec(timestamp)
-        result[connection.topic].append((t_sec, msg))
+    with open(mcap_path, 'rb') as f:
+        reader = _make_mcap_reader(f)
+        for schema, channel, message in reader.iter_messages():
+            if channel.topic in result:
+                msg = typestore.deserialize_cdr(message.data, schema.name)
+                t_sec = message.log_time / 1e9
+                result[channel.topic].append((t_sec, msg))
     return result
 
 
@@ -241,127 +284,177 @@ def process_bag(bag_path, config):
     typestore = get_typestore(Stores.ROS2_HUMBLE)
     bag_path = Path(bag_path)
 
-    with AnyReader([bag_path], default_typestore=typestore) as reader:
-        # Read all messages
-        msgs = _collect_messages_by_topic(reader, typestore, all_topics)
-
-        # Get EEF trajectory as the time reference
-        eef_msgs = msgs[eef_topic]
-        gripper_msgs = msgs[gripper_topic]
-
-        if len(eef_msgs) < 2:
-            print(f"  Skipping {bag_path}: too few EEF messages ({len(eef_msgs)})")
+    # Find the MCAP file inside the bag directory
+    if bag_path.is_dir():
+        mcap_files = list(bag_path.glob('*.mcap'))
+        if not mcap_files:
+            print(f"  Skipping {bag_path}: no MCAP files found")
             return None
+        mcap_path = mcap_files[0]
+    else:
+        mcap_path = bag_path
 
-        # Determine time range and resample at target_hz
-        t_start = eef_msgs[0][0]
-        t_end = eef_msgs[-1][0]
-        dt = 1.0 / target_hz
-        sample_times = np.arange(t_start, t_end, dt)
+    # Read all messages using mcap reader (supports v9/Jazzy bags)
+    msgs = _collect_messages_by_topic(mcap_path, typestore, all_topics)
 
-        if len(sample_times) < 2:
-            print(f"  Skipping {bag_path}: duration too short")
-            return None
+    # Get EEF trajectory as the time reference
+    eef_msgs = msgs[eef_topic]
+    gripper_msgs = msgs[gripper_topic]
 
-        # Extract camera intrinsics, scaled to im_size x im_size.
-        # CameraInfo K is for the original resolution; images are resized
-        # to im_size so K must be scaled to match.
-        intrinsics = np.zeros((ncam, 3, 3), dtype=np.float32)
-        for i, cam_name in enumerate(cam_names):
-            info_msgs = msgs[cameras[cam_name]['camera_info_topic']]
-            rgb_msgs = msgs[cameras[cam_name]['rgb_topic']]
-            if info_msgs:
-                K = _decode_camera_info(info_msgs[0][1])
-                if rgb_msgs:
-                    orig_w, orig_h = rgb_msgs[0][1].width, rgb_msgs[0][1].height
-                    K[0, 0] *= im_size / orig_w   # fx
-                    K[1, 1] *= im_size / orig_h   # fy
-                    K[0, 2] *= im_size / orig_w   # cx
-                    K[1, 2] *= im_size / orig_h   # cy
-                intrinsics[i] = K
-            else:
-                print(f"  Warning: no CameraInfo for {cam_name}")
+    if len(eef_msgs) < 2:
+        print(f"  Skipping {bag_path}: too few EEF messages ({len(eef_msgs)})")
+        return None
 
-        # Extract extrinsics from TF
-        extrinsics = np.zeros((ncam, 4, 4), dtype=np.float32)
-        for i, cam_name in enumerate(cam_names):
-            cam_frame = cameras[cam_name]['tf_frame']
-            with AnyReader([bag_path], default_typestore=typestore) as tf_reader:
-                ext = _compute_extrinsics_from_tf(
-                    tf_reader, typestore, cam_frame, world_frame
-                )
+    # Determine time range and resample at target_hz
+    t_start = eef_msgs[0][0]
+    t_end = eef_msgs[-1][0]
+    dt = 1.0 / target_hz
+    sample_times = np.arange(t_start, t_end, dt)
+
+    if len(sample_times) < 2:
+        print(f"  Skipping {bag_path}: duration too short")
+        return None
+
+    # Extract camera intrinsics, scaled to im_size x im_size.
+    # CameraInfo K is for the original resolution; images are resized
+    # to im_size so K must be scaled to match.
+    intrinsics = np.zeros((ncam, 3, 3), dtype=np.float32)
+    for i, cam_name in enumerate(cam_names):
+        info_msgs = msgs[cameras[cam_name]['camera_info_topic']]
+        rgb_msgs = msgs[cameras[cam_name]['rgb_topic']]
+        if info_msgs:
+            K = _decode_camera_info(info_msgs[0][1])
+            if rgb_msgs:
+                orig_w, orig_h = rgb_msgs[0][1].width, rgb_msgs[0][1].height
+                K[0, 0] *= im_size / orig_w   # fx
+                K[1, 1] *= im_size / orig_h   # fy
+                K[0, 2] *= im_size / orig_w   # cx
+                K[1, 2] *= im_size / orig_h   # cy
+            intrinsics[i] = K
+        else:
+            print(f"  Warning: no CameraInfo for {cam_name}")
+
+    # Read all TF data (static + dynamic) from the bag
+    tf_static, tf_dynamic = _read_all_tf(mcap_path, typestore)
+
+    # Build per-camera TF chain configs.
+    # tf_chain: list of (parent, child) pairs from world_frame to cam_frame.
+    # If a direct static TF exists, the chain is just that single pair.
+    # If the camera has a tf_chain config, use that for dynamic resolution.
+    cam_chains = {}
+    cam_static_ext = {}
+    has_dynamic_cam = False
+    for cam_name in cam_names:
+        cam_cfg = cameras[cam_name]
+        cam_frame = cam_cfg['tf_frame']
+        if 'tf_chain' in cam_cfg:
+            # Explicit chain specified in config (for eye-in-hand cameras)
+            cam_chains[cam_name] = [tuple(pair) for pair in cam_cfg['tf_chain']]
+            has_dynamic_cam = True
+        else:
+            # Try direct static TF lookup
+            ext = _compute_static_extrinsic(tf_static, cam_frame, world_frame)
             if ext is not None:
-                extrinsics[i] = ext
+                cam_static_ext[cam_name] = ext
             else:
-                print(f"  Warning: no TF for {cam_name} ({cam_frame} -> {world_frame}), "
-                      f"using identity")
-                extrinsics[i] = np.eye(4, dtype=np.float32)
+                print(f"  Warning: no static TF for {cam_name} "
+                      f"({cam_frame} -> {world_frame}), using identity")
+                cam_static_ext[cam_name] = np.eye(4, dtype=np.float32)
 
-        # Resample all data at target_hz
-        rgbs = []
-        depths = []
-        eef_states = []
+    # Resample all data at target_hz
+    rgbs = []
+    depths = []
+    eef_states = []
+    per_frame_ext_list = []
+    tf_sync_deltas = []  # time sync deltas for TF chain lookups
 
-        for t_sample in sample_times:
-            # EEF pose
-            eef_msg = _find_closest_msg(t_sample, eef_msgs, sync_slop * 2)
-            grip_msg = _find_closest_msg(t_sample, gripper_msgs, sync_slop * 2)
-            if eef_msg is None:
-                continue
+    for t_sample in sample_times:
+        # EEF pose
+        eef_msg = _find_closest_msg(t_sample, eef_msgs, sync_slop * 2)
+        grip_msg = _find_closest_msg(t_sample, gripper_msgs, sync_slop * 2)
+        if eef_msg is None:
+            continue
 
-            pose = _decode_pose(eef_msg)
-            gripper = _decode_gripper(grip_msg) if grip_msg is not None else np.float32(0.0)
-            eef_state = np.concatenate([pose, [gripper]])
-            eef_states.append(eef_state)
+        pose = _decode_pose(eef_msg)
+        gripper = _decode_gripper(grip_msg) if grip_msg is not None else np.float32(0.0)
+        eef_state = np.concatenate([pose, [gripper]])
+        eef_states.append(eef_state)
 
-            # Camera images
-            frame_rgbs = []
-            frame_depths = []
-            valid = True
+        # Camera images and per-frame extrinsics
+        frame_rgbs = []
+        frame_depths = []
+        frame_ext = np.zeros((ncam, 4, 4), dtype=np.float32)
+        valid = True
 
-            for cam_name in cam_names:
-                cam_cfg = cameras[cam_name]
-                rgb_msg = _find_closest_msg(
-                    t_sample, msgs[cam_cfg['rgb_topic']], sync_slop
-                )
-                depth_msg = _find_closest_msg(
-                    t_sample, msgs[cam_cfg['depth_topic']], sync_slop
-                )
+        for i, cam_name in enumerate(cam_names):
+            cam_cfg = cameras[cam_name]
+            rgb_msg = _find_closest_msg(
+                t_sample, msgs[cam_cfg['rgb_topic']], sync_slop
+            )
+            depth_msg = _find_closest_msg(
+                t_sample, msgs[cam_cfg['depth_topic']], sync_slop
+            )
 
-                if rgb_msg is None or depth_msg is None:
-                    valid = False
-                    break
+            if rgb_msg is None or depth_msg is None:
+                valid = False
+                break
 
-                rgb = _decode_image(rgb_msg, typestore)
-                depth = _decode_image(depth_msg, typestore)
+            rgb = _decode_image(rgb_msg, typestore)
+            depth = _decode_image(depth_msg, typestore)
 
-                rgb = _resize_image(rgb, im_size)
-                depth = _resize_image(depth, im_size)
+            rgb = _resize_image(rgb, im_size)
+            depth = _resize_image(depth, im_size)
 
-                frame_rgbs.append(rgb)
-                frame_depths.append(depth)
+            frame_rgbs.append(rgb)
+            frame_depths.append(depth)
 
-            if not valid:
-                # Drop this timestep if any camera data is missing
-                eef_states.pop()
-                continue
+            # Extrinsics: TF chain (dynamic) or static lookup
+            if cam_name in cam_chains:
+                mat, dt = _compute_tf_chain(
+                    tf_static, tf_dynamic, cam_chains[cam_name], t_sample)
+                frame_ext[i] = mat
+                tf_sync_deltas.append(dt)
+            else:
+                frame_ext[i] = cam_static_ext[cam_name]
 
-            rgbs.append(frame_rgbs)
-            depths.append(frame_depths)
+        if not valid:
+            eef_states.pop()
+            continue
 
-        if len(eef_states) < 2:
-            print(f"  Skipping {bag_path}: too few synchronized frames ({len(eef_states)})")
-            return None
+        rgbs.append(frame_rgbs)
+        depths.append(frame_depths)
+        per_frame_ext_list.append(frame_ext)
 
-        eef_states = np.stack(eef_states)  # (T, 8)
+    if len(eef_states) < 2:
+        print(f"  Skipping {bag_path}: too few synchronized frames ({len(eef_states)})")
+        return None
 
-        return {
-            'rgbs': rgbs,           # list of T x [ncam images]
-            'depths': depths,       # list of T x [ncam depth maps]
-            'eef_states': eef_states,
-            'extrinsics': extrinsics,
-            'intrinsics': intrinsics,
-        }
+    eef_states = np.stack(eef_states)  # (T, 8)
+
+    # Time sync validation for TF chain lookups
+    if tf_sync_deltas:
+        max_dt = max(tf_sync_deltas)
+        mean_dt = np.mean(tf_sync_deltas)
+        warn_threshold = sync_slop
+        if max_dt > warn_threshold:
+            print(f"  WARNING: TF sync max_dt={max_dt*1000:.1f}ms > slop={warn_threshold*1000:.0f}ms "
+                  f"(mean={mean_dt*1000:.1f}ms)")
+        else:
+            print(f"  TF sync: max_dt={max_dt*1000:.1f}ms, mean={mean_dt*1000:.1f}ms (OK)")
+
+    # Extrinsics: (T, ncam, 4, 4) if any camera has dynamic TF chain, else (ncam, 4, 4)
+    if has_dynamic_cam:
+        extrinsics = np.stack(per_frame_ext_list)  # (T, ncam, 4, 4)
+    else:
+        extrinsics = np.stack([cam_static_ext[c] for c in cam_names])  # (ncam, 4, 4)
+
+    return {
+        'rgbs': rgbs,           # list of T x [ncam images]
+        'depths': depths,       # list of T x [ncam depth maps]
+        'eef_states': eef_states,
+        'extrinsics': extrinsics,
+        'intrinsics': intrinsics,
+    }
 
 
 def save_episode(data, episode_dir, cam_names):
@@ -406,11 +499,15 @@ def find_bag_files(task_dir):
     bags = []
     for entry in sorted(os.listdir(task_dir)):
         full_path = os.path.join(task_dir, entry)
-        # .mcap files
+        # .mcap files at top level
         if entry.endswith('.mcap'):
             bags.append(full_path)
-        # .db3 directories (ROS2 bag format)
         elif os.path.isdir(full_path):
+            # Directories containing .mcap files (e.g. episode_0_bag/)
+            mcap_files = [f for f in os.listdir(full_path) if f.endswith('.mcap')]
+            if mcap_files:
+                bags.append(full_path)
+            # .db3 directories (ROS2 bag format)
             db3_files = [f for f in os.listdir(full_path) if f.endswith('.db3')]
             if db3_files:
                 bags.append(full_path)
@@ -437,10 +534,19 @@ def main():
         bags = find_bag_files(task_bag_dir)
         print(f"Task '{task}': found {len(bags)} bag files")
 
+        # Filter to specific episodes if requested
+        episode_filter = None
+        if args.episodes is not None:
+            episode_filter = set(int(x) for x in args.episodes.split(','))
+            print(f"  Filtering to episodes: {sorted(episode_filter)}")
+
         task_output_dir = os.path.join(output_dir, task)
         os.makedirs(task_output_dir, exist_ok=True)
 
         for ep_idx, bag_path in enumerate(tqdm(bags, desc=f"  {task}")):
+            if episode_filter is not None and ep_idx not in episode_filter:
+                continue
+
             episode_dir = os.path.join(task_output_dir, f'episode_{ep_idx}')
 
             if os.path.exists(episode_dir):
