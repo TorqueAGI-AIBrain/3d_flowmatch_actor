@@ -151,11 +151,15 @@ def _decode_camera_info(msg):
     return K
 
 
-def _resize_image(img, target_size):
-    """Resize image to target_size x target_size."""
+def _resize_image(img, target_size, is_depth=False):
+    """Resize image to target_size x target_size.
+
+    Depth must use INTER_NEAREST to avoid averaging valid/invalid pixels.
+    RGB uses INTER_AREA for clean downsampling.
+    """
     if img.shape[0] == target_size and img.shape[1] == target_size:
         return img
-    interp = cv2.INTER_NEAREST if img.dtype == np.uint16 else cv2.INTER_AREA
+    interp = cv2.INTER_NEAREST if is_depth else cv2.INTER_AREA
     return cv2.resize(img, (target_size, target_size), interpolation=interp)
 
 
@@ -403,7 +407,7 @@ def process_bag(bag_path, config):
             depth = _decode_image(depth_msg, typestore)
 
             rgb = _resize_image(rgb, im_size)
-            depth = _resize_image(depth, im_size)
+            depth = _resize_image(depth, im_size, is_depth=True)
 
             frame_rgbs.append(rgb)
             frame_depths.append(depth)
