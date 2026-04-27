@@ -284,12 +284,20 @@ def preprocess_frame(frame, front_E, front_K, wrist_K, eef_history,
     return rgbs, pcds, proprio
 
 
-def predict_one_step(model, rgbs, pcds, proprio, instr_tokens, device):
-    action_mask = torch.zeros(1, 1, 1, dtype=torch.bool, device=device)
+def predict_trajectory(model, rgbs, pcds, proprio, instr_tokens, device,
+                       traj_length=50):
+    """Run one inference call and return the full predicted trajectory (T, 8).
+
+    action_mask must match training trajectory_length so the denoising model
+    generates a full-length trajectory consistent with training distribution.
+    acts[:,0] == current pos in zarr convention, so future steps are at [1..T-1].
+    """
+    action_mask = torch.zeros(1, traj_length, 1, dtype=torch.bool, device=device)
     with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
         pred = model(None, action_mask, rgbs, None, pcds,
                      instr_tokens, proprio[:, :, :, :7], run_inference=True)
-    return pred[0, 0, 0].cpu().float().numpy()
+    # pred shape: (B, T, nhand, 8) — return full trajectory for hand 0, batch 0
+    return pred[0, :, 0].cpu().float().numpy()  # (T, 8)
 
 
 # ---------------------------------------------------------------------------
@@ -314,42 +322,55 @@ def evaluate_episode(ep_idx, cfg, model, tokenizer, depth2cloud, device):
     depth_scale = cfg.get('depth_scale', 1000.0)
     instr_tokens = tokenizer([cfg.get('instruction', 'do the task')]).to(device)
 
-    print(f"  {N} frames, horizon m={m}, anchors every {m} steps")
+    traj_length = cfg.get('trajectory_length', 50)
+    # Number of trajectory steps to evaluate per anchor (skip step 0 = current pos)
+    eval_steps = min(m, traj_length - 1)
+    print(f"  {N} frames, traj_length={traj_length}, eval {eval_steps} steps per anchor")
 
     gt_all = np.array([f['eef_pose'][:7] for f in frames])
+
+    # Map predicted trajectory indices [1..T-1] to GT 10Hz frame indices.
+    # The 50-step trajectory spans from keyframe to ~end of local segment.
+    # We spread the T-1 future steps proportionally across remaining GT frames.
     segments = []
-    anchor_indices = list(range(0, N - 1, m))
+    n_anchors = max(1, (N - 1) // eval_steps)
+    # Place anchors so trajectory steps map to evenly spaced GT frames
+    frames_per_traj_step = max(1, (N - 1) // (n_anchors * eval_steps))
+    anchor_indices = list(range(0, N - 1, eval_steps * frames_per_traj_step))
 
     for anchor in tqdm(anchor_indices, desc="  Segments"):
-        # Seed proprio with last num_history GT poses up to and including anchor
         eef_history = deque(maxlen=num_history)
         for k in range(num_history - 1, -1, -1):
             hist_idx = max(0, anchor - k)
             eef_history.append(frames[hist_idx]['eef_pose'].copy())
 
-        # Use raw (unscaled) K for model — matches training bug
         rgbs, pcds, _ = preprocess_frame(
             frames[anchor], episode['front_E'], episode['front_K_raw'],
             episode['wrist_K_raw'], eef_history, depth2cloud, depth_scale, device,
         )
 
+        proprio_t = torch.from_numpy(
+            np.stack(list(eef_history))
+        ).unsqueeze(0).unsqueeze(2).to(device)
+        traj_pred = predict_trajectory(model, rgbs, pcds, proprio_t, instr_tokens,
+                                       device, traj_length=traj_length)
+
+        # Remaining GT frames from anchor to end of episode
+        remaining = N - 1 - anchor
         seg_preds, seg_gt, seg_errors = [], [], []
-        for step in range(m):
-            target_idx = anchor + step + 1
-            if target_idx >= N:
-                break
+        for step in range(eval_steps):
+            # Map trajectory index [1..eval_steps] to GT frame proportionally
+            traj_idx = step + 1
+            # Fraction through trajectory (skip step 0 = current pos)
+            frac = traj_idx / (traj_length - 1)
+            gt_idx = anchor + int(round(frac * remaining))
+            gt_idx = min(gt_idx, N - 1)
 
-            proprio = torch.from_numpy(
-                np.stack(list(eef_history))
-            ).unsqueeze(0).unsqueeze(2).to(device)
-
-            pred_np = predict_one_step(model, rgbs, pcds, proprio, instr_tokens, device)
-            gt_pose = gt_all[target_idx]
-
-            eef_history.append(pred_np.copy())
+            pred_np = traj_pred[traj_idx, :7]
+            gt_pose = gt_all[gt_idx]
 
             pos_err = np.linalg.norm(pred_np[:3] - gt_pose[:3])
-            seg_preds.append(pred_np[:7].copy())
+            seg_preds.append(pred_np.copy())
             seg_gt.append(gt_pose.copy())
             seg_errors.append(pos_err)
 
@@ -382,17 +403,32 @@ def evaluate_episode(ep_idx, cfg, model, tokenizer, depth2cloud, device):
     wrist_pts = pcds_np[1].reshape(3, -1).T
     wrist_rgb = (rgbs_np[1].reshape(3, -1).T * 255).astype(np.uint8)
 
-    # Filter invalid points and subsample for visualization
-    def _filter_subsample(pts, colors, max_points=5000):
+    # Filter invalid points and voxel downsample for visualization
+    def _filter_voxel_downsample(pts, colors, voxel_size=0.005):
         valid = np.isfinite(pts).all(axis=1) & (np.abs(pts) < 10.0).all(axis=1)
         pts, colors = pts[valid], colors[valid]
-        if len(pts) > max_points:
-            idx = np.random.RandomState(0).choice(len(pts), max_points, replace=False)
-            pts, colors = pts[idx], colors[idx]
-        return pts, colors
+        if len(pts) == 0:
+            return pts, colors
+        # Voxel grid downsampling: average points and colors per voxel
+        voxel_ids = np.floor(pts / voxel_size).astype(np.int32)
+        _, unique_idx, inverse = np.unique(
+            voxel_ids, axis=0, return_index=True, return_inverse=True)
+        # Average colors per voxel for smoother appearance
+        n_voxels = len(unique_idx)
+        avg_pts = np.zeros((n_voxels, 3), dtype=np.float32)
+        avg_rgb = np.zeros((n_voxels, 3), dtype=np.float32)
+        counts = np.zeros(n_voxels, dtype=np.float32)
+        for i in range(len(pts)):
+            v = inverse[i]
+            avg_pts[v] += pts[i]
+            avg_rgb[v] += colors[i].astype(np.float32)
+            counts[v] += 1
+        avg_pts /= counts[:, None]
+        avg_rgb = (avg_rgb / counts[:, None]).astype(np.uint8)
+        return avg_pts, avg_rgb
 
-    front_pts, front_rgb = _filter_subsample(front_pts, front_rgb)
-    wrist_pts, wrist_rgb = _filter_subsample(wrist_pts, wrist_rgb)
+    front_pts, front_rgb = _filter_voxel_downsample(front_pts, front_rgb)
+    wrist_pts, wrist_rgb = _filter_voxel_downsample(wrist_pts, wrist_rgb)
 
     return {
         'episode': ep_idx, 'num_frames': N, 'horizon': m,

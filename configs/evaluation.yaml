@@ -18,13 +18,14 @@ finetune_backbone: false
 finetune_text_encoder: false
 
 # Checkpoint
-checkpoint: train_logs/XArm/default_task-denoise3d-C144-B16-rectified_flow-ft/best.pth
+checkpoint: train_logs/XArm/denoise3d-XArm-C144-B16-lr1e-4-constant-H3-rectified_flow-toolbox/best.pth
 
 # Offline inference
-bag_dir: data/xarm/default_task
-output_dir: evaluation/results/mcap_inference
+bag_dir: data/xarm/place_object_in_toolbox
+output_dir: offline_evaluation/results/horizon_eval
 val_episodes: [9, 20, 32]
-instruction: "do the task"
+instruction: "place object in toolbox"
+trajectory_length: 50
 target_hz: 10.0
 sync_slop: 0.05
 depth_scale: 1.0  # 32FC1 depth already in metres; use 1000.0 for 16UC1 (mm)
