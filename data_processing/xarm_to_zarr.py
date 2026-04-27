@@ -373,24 +373,39 @@ def process_episode(episode_dir, cameras, nhand, num_history, trajectory_length,
     if input_quat_format == 'wxyz':
         eef_states = _convert_quat_wxyz_to_xyzw(eef_states)
 
-    # Load camera parameters (constant across episode)
-    extrinsics = np.load(
+    # Load camera parameters
+    extrinsics_raw = np.load(
         os.path.join(episode_dir, "camera_extrinsics.npy")
-    ).astype(np.float16)  # (ncam, 4, 4)
+    ).astype(np.float16)
     intrinsics = np.load(
         os.path.join(episode_dir, "camera_intrinsics.npy")
     ).astype(np.float16)  # (ncam, 3, 3)
+
+    # Per-frame extrinsics: (T, ncam, 4, 4), static: (ncam, 4, 4)
+    per_frame_ext = (extrinsics_raw.ndim == 4 and extrinsics_raw.shape[1] == ncam)
+    if per_frame_ext:
+        assert extrinsics_raw.shape == (T, ncam, 4, 4), \
+            f"Expected extrinsics shape ({T}, {ncam}, 4, 4), got {extrinsics_raw.shape}"
+    else:
+        assert extrinsics_raw.shape == (ncam, 4, 4), \
+            f"Expected extrinsics shape ({ncam}, 4, 4), got {extrinsics_raw.shape}"
 
     # Handle camera ordering from camera_names.json if present
     data_cam_names = _read_camera_names(episode_dir)
     cam_reorder_map = None
     if data_cam_names is not None and data_cam_names != cameras:
-        extrinsics, intrinsics, cam_reorder_map = _reorder_cameras(
-            data_cam_names, cameras, extrinsics, intrinsics
-        )
+        if per_frame_ext:
+            # Reorder per-frame: (T, ncam, 4, 4) -> reorder ncam axis
+            data_cam_list = data_cam_names if isinstance(data_cam_names, list) else list(data_cam_names)
+            cam_map = [data_cam_list.index(c) for c in cameras]
+            extrinsics_raw = extrinsics_raw[:, cam_map]
+            intrinsics = intrinsics[cam_map]
+            cam_reorder_map = cam_map
+        else:
+            extrinsics_raw, intrinsics, cam_reorder_map = _reorder_cameras(
+                data_cam_names, cameras, extrinsics_raw, intrinsics
+            )
 
-    assert extrinsics.shape == (ncam, 4, 4), \
-        f"Expected extrinsics shape ({ncam}, 4, 4), got {extrinsics.shape}"
     assert intrinsics.shape == (ncam, 3, 3), \
         f"Expected intrinsics shape ({ncam}, 3, 3), got {intrinsics.shape}"
 
@@ -435,8 +450,12 @@ def process_episode(episode_dir, cameras, nhand, num_history, trajectory_length,
     rgbs = np.stack(rgbs)      # (num_samples, ncam, 3, H, W)
     depths = np.stack(depths)  # (num_samples, ncam, H, W)
 
-    # Replicate camera params for each sample
-    extr = np.tile(extrinsics[None], (num_samples, 1, 1, 1))  # (num_samples, ncam, 4, 4)
+    # Camera params per sample
+    if per_frame_ext:
+        # Index per-frame extrinsics at observation keyframes
+        extr = np.stack([extrinsics_raw[kf] for kf in obs_keyframes])  # (num_samples, ncam, 4, 4)
+    else:
+        extr = np.tile(extrinsics_raw[None], (num_samples, 1, 1, 1))  # (num_samples, ncam, 4, 4)
     intr = np.tile(intrinsics[None], (num_samples, 1, 1, 1))  # (num_samples, ncam, 3, 3)
 
     result = {
@@ -532,7 +551,10 @@ def main():
         num_joints = np.load(joint_path).shape[1]
         print(f"Detected joint states with {num_joints} joints")
 
-    print(f"Quaternion input format: {args.input_quat_format} (will convert to xyzw)")
+    if args.input_quat_format == 'wxyz':
+        print(f"Quaternion input format: wxyz (will convert to xyzw)")
+    else:
+        print(f"Quaternion input format: xyzw (no conversion needed)")
 
     # Shuffle and split train/val
     rng = np.random.RandomState(42)
@@ -551,6 +573,22 @@ def main():
 
     # Create output directory
     os.makedirs(args.tgt, exist_ok=True)
+
+    # Save train/val split info
+    split_info = {
+        "seed": 42,
+        "val_ratio": args.val_ratio,
+        "train_episodes": [
+            os.path.basename(all_episodes[i][0]) for i in sorted(train_indices)
+        ],
+        "val_episodes": [
+            os.path.basename(all_episodes[i][0]) for i in sorted(val_indices)
+        ],
+    }
+    split_info_path = os.path.join(args.tgt, "split_info.json")
+    with open(split_info_path, "w") as f:
+        json.dump(split_info, f, indent=2)
+    print(f"Split info saved to {split_info_path}")
 
     # Process train and val splits
     for split, split_indices in [("train", train_indices), ("val", val_indices)]:

@@ -4,9 +4,9 @@
 root: data/xarm/place_object_in_toolbox_episodes
 tgt: data/xarm/place_object_in_toolbox_zarr
 
-# Tasks to include
+# Tasks to include (must match subfolder name under root)
 tasks:
-  - place_object_in_toolbox
+  - default_task_fixed_v3
 
 # Camera names (must match filenames in episode rgb/depth folders)
 cameras:
@@ -18,11 +18,11 @@ nhand: 1
 
 # Processing
 val_ratio: 0.1
-trajectory_length: 1  # 1 = keypose only
+trajectory_length: 50  # match hiveformer pretrained format
 num_history: 3
 
 # Keyframe detection
-keyframe_gripper_change: false
+keyframe_gripper_change: true
 keyframe_velocity_threshold: 0.01
 
 # Quaternion format in eef_states.npy (ROS PoseStamped uses xyzw)
