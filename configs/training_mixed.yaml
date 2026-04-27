@@ -1,20 +1,24 @@
-# training.yaml: 3D FlowMatch Actor training config for xArm real arm (single task).
+# training_mixed.yaml: Finetune from bookshelf pretrained weights (C144) on mixed
+# bookshelf + place_object_in_toolbox data.
 
 # Dataset / loader
 dataset: XArm
-train_data_dir: data/xarm/place_object_in_toolbox_zarr/train.zarr
-eval_data_dir: data/xarm/place_object_in_toolbox_zarr/val.zarr
-train_instructions: instructions/xarm/instructions.json
-val_instructions: instructions/xarm/instructions.json
+train_data_dir: data/xarm/mixed_bookshelf_toolbox_zarr/train.zarr
+eval_data_dir:  data/xarm/mixed_bookshelf_toolbox_zarr/val.zarr
+train_instructions: instructions/xarm/instructions_mixed.json
+val_instructions:   instructions/xarm/instructions_mixed.json
 num_workers: 4
 batch_size: 16
 batch_size_val: 16
 chunk_size: 1
 memory_limit: 8
 
+# Checkpoint to finetune from (best.pth has no optimizer state -> fresh optimizer)
+checkpoint: train_logs/put_books_on_bookshelf-denoise3d-C144-B16-rectified_flow/best.pth
+
 # Logging
 exp_log_dir: XArm
-run_log_dir: denoise3d-XArm-C120-B16-lr1e-4-constant-H3-rectified_flow
+run_log_dir: denoise3d-XArm-C144-B16-lr1e-4-constant-H3-rectified_flow-mixed
 
 # Training
 val_freq: 2000
@@ -31,7 +35,7 @@ lv2_batch_size: 1
 # Model: policy
 model_type: denoise3d
 bimanual: false
-keypose_only: true
+keypose_only: false
 pre_tokenize: true
 workspace_normalizer_buffer: 0.05
 
@@ -41,8 +45,8 @@ finetune_backbone: false
 finetune_text_encoder: false
 fps_subsampling_factor: 4
 
-# Model: dimensions
-embedding_dim: 120
+# Model: dimensions (must match pretrained C144 checkpoint)
+embedding_dim: 144
 num_attn_heads: 8
 num_vis_instr_attn_layers: 2
 num_history: 3
