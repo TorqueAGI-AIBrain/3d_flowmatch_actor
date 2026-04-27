@@ -229,10 +229,11 @@ class BaseTrainTester:
         # Get model
         model = self.get_model()
         self.tokenizer = fetch_tokenizers(self.args.backbone)
-        if not self.args.checkpoint or not os.path.exists(self.args.checkpoint):
-            normalizer = self.get_workspace_normalizer()
-            model.workspace_normalizer.copy_(normalizer)
-            dist.barrier(device_ids=[torch.cuda.current_device()])
+        # Always compute normalizer from current training data.
+        # When finetuning, the checkpoint may have bounds from a different task.
+        normalizer = self.get_workspace_normalizer()
+        model.workspace_normalizer.copy_(normalizer)
+        dist.barrier(device_ids=[torch.cuda.current_device()])
 
         # Get optimizer
         optimizer = self.get_optimizer(model)
@@ -260,6 +261,9 @@ class BaseTrainTester:
         start_iter, best_loss = 0, None
         if self.args.checkpoint:
             start_iter, best_loss = self.load_checkpoint(model, ema_model, optimizer)
+        # Reapply normalizer from current data AFTER checkpoint load,
+        # since checkpoint may contain bounds from a different task.
+        model.module.workspace_normalizer.copy_(normalizer)
         print(model.module.workspace_normalizer)
 
         # Eval only

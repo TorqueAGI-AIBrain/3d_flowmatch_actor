@@ -5,123 +5,117 @@ Tools for collecting real robot demonstrations and converting them into training
 ## Pipeline
 
 ```
-                  Option A: Live recording
-ROS2 topics ──────► ros2_record_demos.py ──► episode dirs ─┐
-                                                            ├──► real_arm_to_zarr.py ──► zarr stores
-ROS2 bags (.mcap) ► bag_to_episodes.py ────► episode dirs ─┘
-                  Option B: Offline extraction
+ROS2 bags (.mcap) -> bag_to_episodes.py -> episode dirs -> xarm_to_zarr.py -> zarr stores
+                                               |
+                                        episode_viewer.py (verification)
 ```
 
-Both paths produce the same episode directory format, which `real_arm_to_zarr.py` converts to zarr for training.
+## Bag to Episode Extraction
 
-## Step 1: Collect Demonstrations
-
-### Option A: Live Recording
-
-`ros2_record_demos.py` — a ROS2 node that captures synchronized RGB, depth, EEF pose, and gripper state in real time.
+`bag_to_episodes.py` converts ROS2 bag files (MCAP v9/Jazzy) into episode directories. Uses `mcap.reader` directly (not rosbags AnyReader) for v9 bag support.
 
 ```bash
-# Configure topics and cameras in the YAML
-ros2 run data_generation ros2_record_demos \
-    --ros-args \
-    -p task_name:=place_wrench \
-    -p output_dir:=/data/robot_demos \
-    -p cameras:="['front', 'wrist']" \
-    -p hz:=10.0 \
-    -p instruction:="place the wrench in the toolbox"
-```
-
-See `configs/recording.yaml` for the full parameter reference.
-
-**Controls:**
-- `ENTER` — start/stop episode recording
-- `q` — quit and save
-
-Episodes can also be triggered via ROS2 services:
-```bash
-ros2 service call /recorder/start_episode std_srvs/srv/Trigger
-ros2 service call /recorder/stop_episode  std_srvs/srv/Trigger
-```
-
-### Option B: Offline Bag Extraction
-
-`bag_to_episodes.py` — converts pre-recorded ROS2 bag files (`.mcap` or `.db3`) into episode directories. Handles mixed camera setups (e.g. Azure Kinect front + RealSense D435i wrist).
-
-```bash
+# Extract all episodes
 python -m data_generation.bag_to_episodes --config configs/extraction.yaml
-```
 
-Override any config value via CLI:
-```bash
+# Extract specific episodes (for debugging)
+python -m data_generation.bag_to_episodes --config configs/extraction.yaml --episodes 0
+
+# Override config values via CLI
 python -m data_generation.bag_to_episodes --config configs/extraction.yaml \
-    --bag_dir /other/path --target_hz 5.0
+    --bag_dir /other/path --target_hz 5.0 --episodes 0,5,10
 ```
 
-Expected bag layout:
+### Camera Extrinsics
+
+Two modes depending on camera config:
+
+**Static** (fixed camera, e.g. front): looked up directly from `/tf_static` as `world_frame -> cam_frame`. Extrinsics are constant across the episode.
+
+**Dynamic TF chain** (eye-in-hand camera, e.g. wrist): specified as `tf_chain` in config. Joint TFs from `/tf` are time-synced to each frame, chained with static links from `/tf_static`. Produces per-frame extrinsics `(T, ncam, 4, 4)`.
+
+```yaml
+# configs/extraction.yaml
+cameras:
+  front:
+    tf_frame: front_optical_frame       # static lookup
+  wrist:
+    tf_frame: wrist_optical_frame
+    tf_chain:                            # dynamic TF chain
+      - [link_base, link1]
+      - [link1, link2]
+      - ...
+      - [link_eef, wrist_optical_frame]
 ```
-<bag_dir>/
-    <task_name>/
-        episode_0.mcap
-        episode_1.mcap
+
+TF time synchronization is validated per episode — a warning is printed if the closest joint TF is further than `sync_slop` from the target sample time.
+
+### Depth Handling
+
+- Source bags: 32FC1 (float32, metres) or 16UC1 (uint16, mm)
+- Resize: `INTER_NEAREST` for depth (no interpolation artifacts), `INTER_AREA` for RGB
+- Episode PNGs: uint16 millimetres (`depth_m * 1000`)
+- Intrinsics K is scaled to match the 256x256 resize
+
+### Expected Bag Layout
+
+```
+<bag_dir>/<task_name>/
+    episode_0_bag/
+        episode_0_bag_0.mcap
+        metadata.yaml
+    episode_1_bag/
         ...
-        instructions.json  (optional)
 ```
-
-See `configs/extraction.yaml` for camera topics, sync tolerance, and task list.
 
 ## Episode Directory Format
-
-Both collection methods produce this structure:
 
 ```
 <output_dir>/<task_name>/
     episode_0/
-        rgb/front_0000.png          # 256x256 RGB
+        rgb/front_0000.png              # 256x256 RGB (uint8)
         rgb/wrist_0000.png
-        depth/front_0000.png        # 16-bit PNG, millimeters
+        depth/front_0000.png            # 256x256 depth (uint16 mm)
         depth/wrist_0000.png
-        eef_states.npy              # (T, 8) float32 [x,y,z, qx,qy,qz,qw, gripper]
-        camera_extrinsics.npy       # (ncam, 4, 4) cam-to-world
-        camera_intrinsics.npy       # (ncam, 3, 3)
-    episode_1/
-        ...
-    instructions.json               # {"0": ["place the wrench in the toolbox"]}
+        eef_states.npy                  # (T, 8) float32 [x,y,z, qx,qy,qz,qw, gripper]
+        camera_extrinsics.npy           # (T, ncam, 4, 4) or (ncam, 4, 4) cam-to-world
+        camera_intrinsics.npy           # (ncam, 3, 3) scaled to 256x256
+    instructions.json                   # {"0": ["task instruction"]}
 ```
 
-## Step 2: Convert to Zarr
+## Episode Verification
 
-Convert episode directories to zarr stores for training:
+`episode_viewer.py` loads an extracted episode and visualizes it in Open3D to verify that:
+- Point clouds from both cameras align in world frame (extrinsics are correct)
+- Depth unprojection produces clean geometry (no interpolation artifacts)
+- EEF trajectory overlays correctly in the scene
+- link_base origin sits at the robot base plate
 
 ```bash
-python -m data_processing.real_arm_to_zarr \
-    --root /data/robot_demos \
-    --tgt /data/zarr_output \
-    --cameras front wrist \
-    --tasks place_wrench \
-    --val_ratio 0.1
+# Visualize a single frame
+python -m data_generation.episode_viewer \
+    --episode_dir data/xarm/.../episode_0 \
+    --frame 0
+
+# Multiple frames
+python -m data_generation.episode_viewer \
+    --episode_dir data/xarm/.../episode_0 \
+    --frame 0 --frame 50 --frame 100
 ```
 
-Produces `train.zarr/` and `val.zarr/` compatible with `RealArmDataset`.
+Displays:
+- RGB point clouds from all cameras (transformed to link_base)
+- Coordinate axes at link_base origin (R=X, G=Y, B=Z, 15cm)
+- EEF trajectory (green line) with current position (yellow sphere)
+- Camera positions (red=front, blue=wrist)
 
-## Step 3: Train
+## Zarr Conversion
 
-```bash
-bash scripts/real_arm/train_real_arm.sh
-```
-
-Update `DATA_PATH` in the script to point to your zarr output.
-
-## Configuration Files
-
-| File | Purpose |
-|------|---------|
-| `configs/recording.yaml` | Camera topics, robot topics, recording Hz for live demos |
-| `configs/extraction.yaml` | Bag dir, camera topics, sync tolerance, task list for offline extraction |
+See `data_processing/xarm_to_zarr.py` and `configs/zarr.yaml`.
 
 ## Dependencies
 
-Core: `numpy`, `opencv-python`, `scipy`, `pyyaml`
-
-For live recording: `rclpy`, `cv_bridge`, `tf2_ros`, `sensor_msgs`, `geometry_msgs`
-
-For bag extraction: `rosbags==0.9.23`
+- `mcap` (MCAP reader)
+- `rosbags` (CDR deserialization via `rosbags.typesys`)
+- `numpy`, `opencv-python`, `scipy`
+- `open3d` (for episode_viewer only)

@@ -1,0 +1,28 @@
+# mix_zarr.yaml: Config for mixing bookshelf (Hiveformer) and toolbox (xArm real) zarr datasets.
+
+# Source zarr stores
+bookshelf_train_zarr: data/xarm/put_books_on_bookshelf/train.zarr
+bookshelf_val_zarr:   data/xarm/put_books_on_bookshelf/val.zarr
+toolbox_train_zarr:   data/xarm/place_object_in_toolbox_zarr/train.zarr
+toolbox_val_zarr:     data/xarm/place_object_in_toolbox_zarr/val.zarr
+
+# Output
+output_dir: data/xarm/mixed_bookshelf_toolbox_zarr
+
+# Sampling: approximate 10 bookshelf episodes (~5 keyframes/episode = 50 samples)
+n_bookshelf_train_samples: 50
+n_bookshelf_val_samples: 10
+seed: 42
+
+# Task names (used as keys in instructions.json and for task_id mapping)
+# task_id: bookshelf=0, toolbox=1
+bookshelf_task_name: put_books_on_bookshelf
+toolbox_task_name: place_object_in_toolbox
+
+# Instructions per task (variation "0" for both)
+bookshelf_instructions:
+  - "put 1 books on bookshelf"
+  - "pick up 1 books and place them on the top shelf"
+  - "stack 1 books up on the top shelf"
+toolbox_instructions:
+  - "place object in toolbox"

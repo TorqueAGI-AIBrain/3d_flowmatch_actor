@@ -91,6 +91,11 @@ def parse_arguments():
         help="Velocity threshold for keyframe detection (m/s)"
     )
     parser.add_argument(
+        "--keyframe_distance_threshold", type=float, default=None,
+        help="EEF travel distance per keyframe segment in metres "
+             "(e.g. 0.0127 = 0.5 inch). When set, overrides gripper/velocity detection."
+    )
+    parser.add_argument(
         "--input_quat_format", type=str, default=None,
         choices=["wxyz", "xyzw"],
         help="Quaternion format in eef_states.npy (required)"
@@ -112,6 +117,7 @@ def _resolve_args(args):
         'num_history': 3,
         'keyframe_gripper_change': False,
         'keyframe_velocity_threshold': 0.01,
+        'keyframe_distance_threshold': None,
         'input_quat_format': None,  # required: 'wxyz' or 'xyzw'
     }
 
@@ -173,50 +179,65 @@ def load_depth(episode_dir, cameras, timestep):
     return np.stack(depths)  # (ncam, H, W)
 
 
-def detect_keyframes(eef_states, gripper_change=True, vel_threshold=0.01):
+def detect_keyframes(eef_states, gripper_change=True, vel_threshold=0.01,
+                     distance_threshold=None):
     """
     Detect keyframes from EEF trajectory.
 
-    Keyframes are detected at:
-    - Gripper state changes (open -> close or close -> open)
-    - Low-velocity stops (when the arm pauses)
-    - First and last timestep
+    Two modes (distance_threshold takes priority when set):
+    - distance_threshold: place a keyframe each time EEF travels this far
+      (metres) from the last keyframe. E.g. 0.0127 m = 0.5 inch. Use for
+      tasks with constant gripper state where open/close events don't occur.
+    - default: keyframes at gripper state changes and low-velocity stops.
+
+    Always includes frame 0 and T-1.
 
     Args:
-        eef_states: (T, nhand*8) array of EEF states
-        gripper_change: Whether to use gripper changes for detection
-        vel_threshold: Velocity threshold for stop detection
+        eef_states: (T, nhand*8) float32 EEF states
+        gripper_change: use gripper transitions (ignored if distance_threshold set)
+        vel_threshold: stop threshold in m/step (ignored if distance_threshold set)
+        distance_threshold: EEF travel per segment in metres, or None
 
     Returns:
-        List of keyframe indices (always includes 0 and T-1)
+        Sorted list of keyframe indices
     """
     T = len(eef_states)
     if T <= 2:
         return list(range(T))
 
-    keyframes = set([0, T - 1])
-
-    # Per-arm analysis (handles both single and bimanual)
-    arm_dim = 8
-    n_arms = eef_states.shape[1] // arm_dim if eef_states.ndim == 1 else 1
     if eef_states.ndim == 1:
         eef_states = eef_states.reshape(T, -1)
 
+    arm_dim = 8
+
+    if distance_threshold is not None:
+        # Distance-based: new keyframe every time cumulative EEF travel >= threshold
+        keyframes = [0]
+        positions = eef_states[:, :3]  # use first arm positions
+        accumulated = 0.0
+        for i in range(1, T):
+            accumulated += np.linalg.norm(positions[i] - positions[i - 1])
+            if accumulated >= distance_threshold:
+                keyframes.append(i)
+                accumulated = 0.0
+        if keyframes[-1] != T - 1:
+            keyframes.append(T - 1)
+        return keyframes
+
+    # Default: gripper changes + velocity stops
+    keyframes = set([0, T - 1])
     for arm in range(max(1, eef_states.shape[1] // arm_dim)):
         start = arm * arm_dim
         positions = eef_states[:, start:start + 3]
         gripper = eef_states[:, start + 7]
 
-        # Gripper state changes
         if gripper_change:
             gripper_binary = (gripper > 0.5).astype(int)
             changes = np.where(np.diff(gripper_binary) != 0)[0] + 1
             keyframes.update(changes.tolist())
 
-        # Velocity-based stops (position only)
         velocities = np.linalg.norm(np.diff(positions, axis=0), axis=1)
         stopped = velocities < vel_threshold
-        # Find transitions from moving to stopped
         for i in range(1, len(stopped)):
             if stopped[i] and not stopped[i - 1]:
                 keyframes.add(i + 1)
@@ -347,6 +368,7 @@ def _reorder_cameras(data_cameras, target_cameras, extrinsics, intrinsics):
 
 def process_episode(episode_dir, cameras, nhand, num_history, trajectory_length,
                     keyframe_gripper_change, keyframe_velocity_threshold,
+                    keyframe_distance_threshold=None,
                     input_quat_format='wxyz'):
     """
     Process a single episode directory into arrays ready for zarr.
@@ -373,29 +395,48 @@ def process_episode(episode_dir, cameras, nhand, num_history, trajectory_length,
     if input_quat_format == 'wxyz':
         eef_states = _convert_quat_wxyz_to_xyzw(eef_states)
 
-    # Load camera parameters (constant across episode)
-    extrinsics = np.load(
+    # Load camera parameters
+    extrinsics_raw = np.load(
         os.path.join(episode_dir, "camera_extrinsics.npy")
-    ).astype(np.float16)  # (ncam, 4, 4)
+    ).astype(np.float16)
     intrinsics = np.load(
         os.path.join(episode_dir, "camera_intrinsics.npy")
     ).astype(np.float16)  # (ncam, 3, 3)
+
+    # Per-frame extrinsics: (T, ncam, 4, 4), static: (ncam, 4, 4)
+    per_frame_ext = (extrinsics_raw.ndim == 4 and extrinsics_raw.shape[1] == ncam)
+    if per_frame_ext:
+        assert extrinsics_raw.shape == (T, ncam, 4, 4), \
+            f"Expected extrinsics shape ({T}, {ncam}, 4, 4), got {extrinsics_raw.shape}"
+    else:
+        assert extrinsics_raw.shape == (ncam, 4, 4), \
+            f"Expected extrinsics shape ({ncam}, 4, 4), got {extrinsics_raw.shape}"
 
     # Handle camera ordering from camera_names.json if present
     data_cam_names = _read_camera_names(episode_dir)
     cam_reorder_map = None
     if data_cam_names is not None and data_cam_names != cameras:
-        extrinsics, intrinsics, cam_reorder_map = _reorder_cameras(
-            data_cam_names, cameras, extrinsics, intrinsics
-        )
+        if per_frame_ext:
+            # Reorder per-frame: (T, ncam, 4, 4) -> reorder ncam axis
+            data_cam_list = data_cam_names if isinstance(data_cam_names, list) else list(data_cam_names)
+            cam_map = [data_cam_list.index(c) for c in cameras]
+            extrinsics_raw = extrinsics_raw[:, cam_map]
+            intrinsics = intrinsics[cam_map]
+            cam_reorder_map = cam_map
+        else:
+            extrinsics_raw, intrinsics, cam_reorder_map = _reorder_cameras(
+                data_cam_names, cameras, extrinsics_raw, intrinsics
+            )
 
-    assert extrinsics.shape == (ncam, 4, 4), \
-        f"Expected extrinsics shape ({ncam}, 4, 4), got {extrinsics.shape}"
     assert intrinsics.shape == (ncam, 3, 3), \
         f"Expected intrinsics shape ({ncam}, 3, 3), got {intrinsics.shape}"
 
     # Detect keyframes or use all timesteps
-    if keyframe_gripper_change:
+    if keyframe_distance_threshold is not None:
+        keyframes = detect_keyframes(
+            eef_states, distance_threshold=keyframe_distance_threshold
+        )
+    elif keyframe_gripper_change:
         keyframes = detect_keyframes(
             eef_states, gripper_change=True,
             vel_threshold=keyframe_velocity_threshold
@@ -435,8 +476,12 @@ def process_episode(episode_dir, cameras, nhand, num_history, trajectory_length,
     rgbs = np.stack(rgbs)      # (num_samples, ncam, 3, H, W)
     depths = np.stack(depths)  # (num_samples, ncam, H, W)
 
-    # Replicate camera params for each sample
-    extr = np.tile(extrinsics[None], (num_samples, 1, 1, 1))  # (num_samples, ncam, 4, 4)
+    # Camera params per sample
+    if per_frame_ext:
+        # Index per-frame extrinsics at observation keyframes
+        extr = np.stack([extrinsics_raw[kf] for kf in obs_keyframes])  # (num_samples, ncam, 4, 4)
+    else:
+        extr = np.tile(extrinsics_raw[None], (num_samples, 1, 1, 1))  # (num_samples, ncam, 4, 4)
     intr = np.tile(intrinsics[None], (num_samples, 1, 1, 1))  # (num_samples, ncam, 3, 3)
 
     result = {
@@ -532,7 +577,10 @@ def main():
         num_joints = np.load(joint_path).shape[1]
         print(f"Detected joint states with {num_joints} joints")
 
-    print(f"Quaternion input format: {args.input_quat_format} (will convert to xyzw)")
+    if args.input_quat_format == 'wxyz':
+        print(f"Quaternion input format: wxyz (will convert to xyzw)")
+    else:
+        print(f"Quaternion input format: xyzw (no conversion needed)")
 
     # Shuffle and split train/val
     rng = np.random.RandomState(42)
@@ -551,6 +599,22 @@ def main():
 
     # Create output directory
     os.makedirs(args.tgt, exist_ok=True)
+
+    # Save train/val split info
+    split_info = {
+        "seed": 42,
+        "val_ratio": args.val_ratio,
+        "train_episodes": [
+            os.path.basename(all_episodes[i][0]) for i in sorted(train_indices)
+        ],
+        "val_episodes": [
+            os.path.basename(all_episodes[i][0]) for i in sorted(val_indices)
+        ],
+    }
+    split_info_path = os.path.join(args.tgt, "split_info.json")
+    with open(split_info_path, "w") as f:
+        json.dump(split_info, f, indent=2)
+    print(f"Split info saved to {split_info_path}")
 
     # Process train and val splits
     for split, split_indices in [("train", train_indices), ("val", val_indices)]:
@@ -572,6 +636,7 @@ def main():
                 episode_dir, args.cameras, args.nhand, args.num_history,
                 args.trajectory_length,
                 args.keyframe_gripper_change, args.keyframe_velocity_threshold,
+                keyframe_distance_threshold=args.keyframe_distance_threshold,
                 input_quat_format=args.input_quat_format
             )
             if data is None:

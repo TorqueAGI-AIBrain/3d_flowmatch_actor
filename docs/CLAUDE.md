@@ -36,9 +36,33 @@ bash online_evaluation_rlbench/eval_hiveformer.sh
 
 ### Data Pipeline (xArm real robot)
 ```
-ROS2 bag → bag_to_episodes.py → episode directories → xarm_to_zarr.py → zarr store
+ROS2 bags (.mcap) -> bag_to_episodes.py -> episode dirs -> xarm_to_zarr.py -> zarr store
+                                               |
+                                        episode_viewer.py (Open3D verification)
 ```
+
+```bash
+# Extract episodes from MCAP bags (runs in Docker for dependencies)
+docker run --rm --user $(id -u):$(id -g) -v $(pwd):/workspace -w /workspace 3dfa:latest \
+    python3 -m data_generation.bag_to_episodes --config configs/extraction.yaml
+
+# Extract single episode for debugging
+docker run --rm --user $(id -u):$(id -g) -v $(pwd):/workspace -w /workspace 3dfa:latest \
+    python3 -m data_generation.bag_to_episodes --config configs/extraction.yaml --episodes 0
+
+# Verify extracted episode with Open3D point cloud viewer
+python3 -m data_generation.episode_viewer --episode_dir data/xarm/.../episode_0 --frame 0
+```
+
 Configs: `configs/extraction.yaml`, `configs/zarr.yaml`
+
+Key extraction details:
+- Uses `mcap.reader` directly (not rosbags AnyReader) for v9/Jazzy bag support
+- Wrist camera extrinsics: per-frame via dynamic TF chain (time-synced joint angles + static links)
+- Front camera extrinsics: static from `/tf_static`
+- Depth resize: `INTER_NEAREST` (not `INTER_AREA`) to avoid averaging valid/invalid pixels
+- Intrinsics K scaled to match 256x256 image resize
+- Depth stored as uint16 mm PNGs, `DEPTH_MM_SCALE = 1000.0`
 
 ### Docker
 ```bash

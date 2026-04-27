@@ -1,0 +1,14 @@
+{
+  "put_books_on_bookshelf": {
+    "0": [
+      "put 1 books on bookshelf",
+      "pick up 1 books and place them on the top shelf",
+      "stack 1 books up on the top shelf"
+    ]
+  },
+  "place_object_in_toolbox": {
+    "0": [
+      "place object in toolbox"
+    ]
+  }
+}
