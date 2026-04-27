@@ -22,8 +22,11 @@ trajectory_length: 50  # match hiveformer pretrained format
 num_history: 3
 
 # Keyframe detection
-keyframe_gripper_change: true
+# Use distance-based keyframes (0.5 inch) since gripper state is constant
+# for this task (no open/close events captured in bags)
+keyframe_gripper_change: false
 keyframe_velocity_threshold: 0.01
+keyframe_distance_threshold: 0.0127  # 0.5 inch in metres
 
 # Quaternion format in eef_states.npy (ROS PoseStamped uses xyzw)
 input_quat_format: xyzw
