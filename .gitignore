@@ -47,3 +47,6 @@ jina
 modeling/policy/old_diffuser_actor
 zarr_datasets
 peract_test.zip
+debug_*
+*results/
+docs/

@@ -1,7 +1,7 @@
 {
-  "place_wrench_v1": {
+  "default_task_fixed_v3": {
     "0": [
-      "do the task"
+      "place object in toolbox"
     ]
   }
 }
