@@ -2,8 +2,8 @@
 
 # Dataset / loader
 dataset: XArm
-train_data_dir: data/zarr/train.zarr
-eval_data_dir: data/zarr/val.zarr
+train_data_dir: data/xarm/place_object_in_toolbox_zarr/train.zarr
+eval_data_dir: data/xarm/place_object_in_toolbox_zarr/val.zarr
 train_instructions: instructions/xarm/instructions.json
 val_instructions: instructions/xarm/instructions.json
 num_workers: 4

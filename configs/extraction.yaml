@@ -2,9 +2,9 @@
 
 # Input/output paths
 bag_dir: data/xarm
-output_dir: data/xarm/default_task_fixed_v3_episodes
+output_dir: data/xarm/place_object_in_toolbox_episodes
 tasks:
-  - default_task_fixed_v3
+  - place_object_in_toolbox
 
 # Robot
 robot:

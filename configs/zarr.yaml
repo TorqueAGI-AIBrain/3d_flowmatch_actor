@@ -1,12 +1,12 @@
 # zarr.yaml: Episode directory to zarr conversion config.
 
 # Input/output paths
-root: data/xarm/default_task_episodes
-tgt: data/xarm/default_task_zarr
+root: data/xarm/place_object_in_toolbox_episodes
+tgt: data/xarm/place_object_in_toolbox_zarr
 
 # Tasks to include
 tasks:
-  - default_task
+  - place_object_in_toolbox
 
 # Camera names (must match filenames in episode rgb/depth folders)
 cameras:

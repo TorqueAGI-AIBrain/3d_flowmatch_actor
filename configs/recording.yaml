@@ -1,8 +1,8 @@
 # recording.yaml: ROS2 demo recording configuration for xArm + cameras.
 
-task_name: default_task
+task_name: place_object_in_toolbox
 output_dir: /data/robot_demos
-instruction: "do the task"
+instruction: "place object in toolbox"
 variation: 0
 hz: 10.0
 nhand: 1
