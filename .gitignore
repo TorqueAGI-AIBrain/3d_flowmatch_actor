@@ -29,6 +29,7 @@ diffusion_taskABC_D-C192-B30-lr3e-4-DI1-20-Phistory_selfattn_epsilon_instrcond-H
 train_logs/
 eval_logs/
 evaluation/results/
+offline_evaluation/results/
 temp/
 
 # third-party modules

@@ -1,0 +1,52 @@
+# inference.yaml: Inference ROS2 node config for xArm deployment.
+
+# Model checkpoint
+checkpoint: train_logs/XArm/denoise3d-XArm-C120-B16-lr1e-4-constant-H3-rectified_flow/best.pth
+
+# Model config (must match training)
+model_type: denoise3d
+backbone: clip
+embedding_dim: 120
+num_attn_heads: 8
+num_vis_instr_attn_layers: 2
+num_history: 3
+num_shared_attn_layers: 4
+denoise_timesteps: 5
+denoise_model: rectified_flow
+bimanual: false
+keypose_only: true
+rotation_format: quat_xyzw
+fps_subsampling_factor: 4
+
+# Robot
+robot:
+  eef_topic: /xarm/end_effector_pose
+  gripper_topic: /xarm/gripper/state
+  target_pose_topic: /xarm/target_pose
+  world_frame: base_link
+  eef_frame: link_eef
+
+# Cameras
+cameras:
+  front:
+    rgb_topic: /rgb/image_raw
+    depth_topic: /depth_to_rgb/image_raw
+    camera_info_topic: /rgb/camera_info
+    tf_frame: rgb_camera_link
+  wrist:
+    rgb_topic: /camera_wrist/color/image_raw
+    depth_topic: /camera_wrist/aligned_depth_to_color/image_raw
+    camera_info_topic: /camera_wrist/color/camera_info
+    tf_frame: camera_wrist_color_optical_frame
+
+image_size: 256
+
+# Workspace bounds for action denormalization [min, max] per axis
+workspace_bounds:
+  x: [-0.5, 0.5]
+  y: [-0.5, 0.5]
+  z: [0.0, 0.6]
+
+# Inference
+default_instruction: "do the task"
+publish_rate: 10.0  # Hz
